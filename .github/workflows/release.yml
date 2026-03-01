@@ -36,7 +36,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ steps.jar.outputs.path }}
-          generate_release_notes: true
+          body_path: RELEASE_INFO.md
+          replace_existing: true
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
