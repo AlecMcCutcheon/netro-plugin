@@ -1,0 +1,22 @@
+# Build
+target/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.project
+.classpath
+
+# JVM / IDE crash and replay logs
+hs_err_pid*.log
+replay_pid*.log
+
+# Debug logs
+debug.log
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
