@@ -145,6 +145,7 @@ public class AbsorbCommand implements CommandExecutor, TabCompleter {
         Station station = new Station(
             UUID.randomUUID().toString(), name, address, world, x, y, z, System.currentTimeMillis());
         stationRepo.insert(station);
+        if (plugin.getChunkLoadService() != null) plugin.getChunkLoadService().addChunksForBlock(station.getWorld(), station.getSignX(), station.getSignZ());
         if (signBlock.getState() instanceof Sign s) {
             dev.netro.util.SignColors.applyStationSign(s, name, address);
             s.update();

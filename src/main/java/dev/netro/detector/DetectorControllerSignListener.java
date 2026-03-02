@@ -114,11 +114,11 @@ public class DetectorControllerSignListener implements Listener {
 
         // On any sign edit on a copper bulb, clear existing detector/controller so edits (or type change) don't leave stale registrations
         boolean hadDetector = detectorRepo.findByBlock(world, bx, by, bz)
-            .map(d -> { detectorRepo.deleteById(d.getId()); return true; }).orElse(false);
+            .map(d -> { if (plugin.getChunkLoadService() != null) plugin.getChunkLoadService().removeChunksForBlock(d.getWorld(), d.getRailX(), d.getRailZ()); detectorRepo.deleteById(d.getId()); return true; }).orElse(false);
         boolean hadController = controllerRepo.findByBlock(world, bx, by, bz)
             .map(c -> { controllerRepo.deleteById(c.getId()); return true; }).orElse(false);
         boolean hadStationDetector = stationDetectorRepo.findByBlock(world, bx, by, bz)
-            .map(d -> { stationDetectorRepo.deleteById(d.getId()); return true; }).orElse(false);
+            .map(d -> { if (plugin.getChunkLoadService() != null) plugin.getChunkLoadService().removeChunksForBlock(d.getWorld(), d.getRailX(), d.getRailZ()); stationDetectorRepo.deleteById(d.getId()); return true; }).orElse(false);
         boolean hadStationController = stationControllerRepo.findByBlock(world, bx, by, bz)
             .map(c -> { stationControllerRepo.deleteById(c.getId()); return true; }).orElse(false);
 
@@ -207,6 +207,7 @@ public class DetectorControllerSignListener implements Listener {
                     setDestValue
                 );
                 stationDetectorRepo.insert(sd);
+                if (plugin.getChunkLoadService() != null) plugin.getChunkLoadService().addChunksForBlock(sd.getWorld(), sd.getRailX(), sd.getRailZ());
                 applyDetectorSignColors(event, "[Detector]", name, SignTextHelper.readSignLine(event.getLine(2)), SignTextHelper.readSignLine(event.getLine(3)));
                 player.sendMessage("Station detector registered for " + name + ".");
                 return;
@@ -273,6 +274,7 @@ public class DetectorControllerSignListener implements Listener {
             rule4 != null ? rule4[1] : null
         );
         detectorRepo.insert(d);
+        if (plugin.getChunkLoadService() != null) plugin.getChunkLoadService().addChunksForBlock(d.getWorld(), d.getRailX(), d.getRailZ());
         applyDetectorSignColors(event, line0, name, SignTextHelper.readSignLine(event.getLine(2)), SignTextHelper.readSignLine(event.getLine(3)));
         String msg = "Detector registered for " + name + ".";
         if (!"[Detector]".equalsIgnoreCase(line0)) {
@@ -527,6 +529,7 @@ public class DetectorControllerSignListener implements Listener {
         }
         Player player = event.getPlayer();
         detectorRepo.findByBlock(world, x, y, z).ifPresent(d -> {
+            if (plugin.getChunkLoadService() != null) plugin.getChunkLoadService().removeChunksForBlock(d.getWorld(), d.getRailX(), d.getRailZ());
             detectorRepo.deleteById(d.getId());
             player.sendMessage("Detector removed.");
         });
@@ -535,6 +538,7 @@ public class DetectorControllerSignListener implements Listener {
             player.sendMessage("Controller removed.");
         });
         stationDetectorRepo.findByBlock(world, x, y, z).ifPresent(d -> {
+            if (plugin.getChunkLoadService() != null) plugin.getChunkLoadService().removeChunksForBlock(d.getWorld(), d.getRailX(), d.getRailZ());
             stationDetectorRepo.deleteById(d.getId());
             player.sendMessage("Station detector removed.");
         });
@@ -608,8 +612,12 @@ public class DetectorControllerSignListener implements Listener {
                         }
                         setDestValueAbsorb = line4;
                     }
-                    String existingId = stationDetectorRepo.findByBlock(world, bx, by, bz).map(StationDetector::getId).orElse(null);
-                    if (existingId != null) stationDetectorRepo.deleteById(existingId);
+                    java.util.Optional<StationDetector> existingSd = stationDetectorRepo.findByBlock(world, bx, by, bz);
+                    existingSd.ifPresent(old -> {
+                        if (plugin.getChunkLoadService() != null) plugin.getChunkLoadService().removeChunksForBlock(old.getWorld(), old.getRailX(), old.getRailZ());
+                        stationDetectorRepo.deleteById(old.getId());
+                    });
+                    String existingId = existingSd.map(StationDetector::getId).orElse(null);
                     String[] rule1 = rules.get(0);
                     String[] rule2 = rules.size() > 1 ? rules.get(1) : null;
                     String[] rule3 = rules.size() > 2 ? rules.get(2) : null;
@@ -627,6 +635,7 @@ public class DetectorControllerSignListener implements Listener {
                         setDestValueAbsorb
                     );
                     stationDetectorRepo.insert(sd);
+                    if (plugin.getChunkLoadService() != null) plugin.getChunkLoadService().addChunksForBlock(sd.getWorld(), sd.getRailX(), sd.getRailZ());
                     player.sendMessage(existingId != null ? "Station detector re-registered for " + name + "." : "Station detector absorbed for " + name + ".");
                     return;
                 }
@@ -665,8 +674,12 @@ public class DetectorControllerSignListener implements Listener {
                 player.sendMessage("Detector requires at least one rule (ENTRY, READY, CLEAR or ROUTE) on lines 3–4.");
                 return;
             }
-            String existingId = detectorRepo.findByBlock(world, bx, by, bz).map(Detector::getId).orElse(null);
-            if (existingId != null) detectorRepo.deleteById(existingId);
+            java.util.Optional<Detector> existingDet = detectorRepo.findByBlock(world, bx, by, bz);
+            existingDet.ifPresent(old -> {
+                if (plugin.getChunkLoadService() != null) plugin.getChunkLoadService().removeChunksForBlock(old.getWorld(), old.getRailX(), old.getRailZ());
+                detectorRepo.deleteById(old.getId());
+            });
+            String existingId = existingDet.map(Detector::getId).orElse(null);
             String[] rule1 = nodeRules.get(0);
             String[] rule2 = nodeRules.size() > 1 ? nodeRules.get(1) : null;
             String[] rule3 = nodeRules.size() > 2 ? nodeRules.get(2) : null;
@@ -683,6 +696,7 @@ public class DetectorControllerSignListener implements Listener {
                 rule4 != null ? rule4[0] : null, rule4 != null ? rule4[1] : null
             );
             detectorRepo.insert(d);
+            if (plugin.getChunkLoadService() != null) plugin.getChunkLoadService().addChunksForBlock(d.getWorld(), d.getRailX(), d.getRailZ());
             String absorbMsg = existingId != null ? "Detector re-registered for " + name + "." : "Detector absorbed for " + name + ".";
             if (!"[Detector]".equalsIgnoreCase(line0)) {
                 absorbMsg = existingId != null ? line0 + " detector re-registered for " + name + "." : line0 + " detector absorbed for " + name + ".";

@@ -95,6 +95,7 @@ public class StationCommand implements CommandExecutor, TabCompleter {
             long now = System.currentTimeMillis();
             Station station = new Station(id, name, address, worldName, x, y, z, now);
             stationRepo.insert(station);
+            if (plugin.getChunkLoadService() != null) plugin.getChunkLoadService().addChunksForBlock(station.getWorld(), station.getSignX(), station.getSignZ());
 
             BlockState state = target.getState();
             if (state instanceof Sign sign) {

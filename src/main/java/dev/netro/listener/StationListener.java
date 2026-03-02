@@ -65,6 +65,8 @@ public class StationListener implements Listener {
         long now = System.currentTimeMillis();
         Station station = new Station(id, name, address, worldName, x, y, z, now);
         stationRepo.insert(station);
+        if (plugin.getChunkLoadService() != null)
+            plugin.getChunkLoadService().addChunksForBlock(station.getWorld(), station.getSignX(), station.getSignZ());
         SignColors.applyStationSign(event, name, address);
         event.getPlayer().sendMessage("Station \"" + name + "\" created with address " + address + ".");
     }
@@ -78,6 +80,8 @@ public class StationListener implements Listener {
         String worldName = block.getWorld().getName();
         int x = block.getX(), y = block.getY(), z = block.getZ();
         stationRepo.findAtBlock(worldName, x, y, z).ifPresent(station -> {
+            if (plugin.getChunkLoadService() != null)
+                plugin.getChunkLoadService().removeChunksForBlock(station.getWorld(), station.getSignX(), station.getSignZ());
             stationRepo.deleteById(station.getId());
             event.getPlayer().sendMessage("Station removed (sign broken). Set up again with a new sign or /station create.");
         });

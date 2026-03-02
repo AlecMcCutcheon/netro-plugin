@@ -1,9 +1,13 @@
 package dev.netro;
 
 import dev.netro.api.NetroAPI;
+import dev.netro.chunk.ChunkLoadService;
 import dev.netro.command.*;
 import dev.netro.database.CartRepository;
 import dev.netro.database.Database;
+import dev.netro.database.DetectorRepository;
+import dev.netro.database.StationDetectorRepository;
+import dev.netro.database.StationRepository;
 
 import java.util.Collections;
 import dev.netro.listener.AbsorbWizardListener;
@@ -56,6 +60,7 @@ public class NetroPlugin extends JavaPlugin {
     /** Time (ms) when a detector/READY last applied velocity to this cart (for cruise yield / priority). */
     private final Map<String, Long> lastDetectorControlTimeByCart = new ConcurrentHashMap<>();
     private dev.netro.gui.CartControllerGuiListener cartControllerGuiListener;
+    private ChunkLoadService chunkLoadService;
 
     @Override
     public void onEnable() {
@@ -126,6 +131,14 @@ public class NetroPlugin extends JavaPlugin {
 
         scheduleStaleCartCleanup();
 
+        chunkLoadService = new ChunkLoadService(this,
+            new StationRepository(database),
+            new StationDetectorRepository(database),
+            new DetectorRepository(database),
+            new CartRepository(database));
+        chunkLoadService.loadAllFromDatabase();
+        chunkLoadService.startCartChunkTask();
+
         getLogger().info("Netro enabled.");
     }
 
@@ -176,6 +189,10 @@ public class NetroPlugin extends JavaPlugin {
 
     @Override
     public void onDisable() {
+        if (chunkLoadService != null) {
+            chunkLoadService.unloadAll();
+            chunkLoadService = null;
+        }
         if (database != null) database.close();
         getLogger().info("Netro disabled.");
     }
@@ -227,19 +244,20 @@ public class NetroPlugin extends JavaPlugin {
     public void removeReadyHold(String cartUuid) { readyHoldCarts.remove(cartUuid); }
     public ReadyHoldInfo getReadyHoldInfo(String cartUuid) { return readyHoldCarts.get(cartUuid); }
 
+    /** Chunk loading for detectors/stations/carts; null before onEnable or after onDisable. */
+    public ChunkLoadService getChunkLoadService() { return chunkLoadService; }
+
     /** Call when READY hold applied (no magnitude to sync). Yields cruise so detectors/rails keep control. */
     public void notifyCartVelocityControlledByDetector(String cartUuid) {
         lastDetectorControlTimeByCart.put(cartUuid, System.currentTimeMillis());
         if (cartControllerGuiListener != null) cartControllerGuiListener.yieldCart(cartUuid);
     }
 
-    /** Call when MINV/MAXV applied velocity: yields cruise and updates stored cruise speed to {@code appliedSpeedMagnitude} so the GUI and future Start use it. */
+    /** Call when MINV/MAXV applied velocity: updates stored cruise speed; for carts that never had GUI opened, turns Start (cruise) on so they keep this V. Does not yield (READY yields). */
     public void notifyCartVelocityControlledByDetector(String cartUuid, double appliedSpeedMagnitude) {
         lastDetectorControlTimeByCart.put(cartUuid, System.currentTimeMillis());
-        if (cartControllerGuiListener != null) {
-            cartControllerGuiListener.yieldCart(cartUuid);
+        if (cartControllerGuiListener != null)
             cartControllerGuiListener.updateStoredSpeedFromMagnitude(cartUuid, appliedSpeedMagnitude);
-        }
     }
 
     /** True if detector/READY last controlled this cart within the last {@code withinTicks} ticks (~50 ms per tick). */

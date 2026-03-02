@@ -1,5 +1,6 @@
 package dev.netro.database;
 
+import dev.netro.model.BlockPos;
 import dev.netro.model.Detector;
 
 import java.sql.PreparedStatement;
@@ -65,6 +66,19 @@ public class DetectorRepository {
                 try (ResultSet rs = ps.executeQuery()) {
                     return rs.next() ? Optional.of(rowToDetector(rs)) : Optional.empty();
                 }
+            }
+        });
+    }
+
+    /** All detector rail positions (world, rail_x, rail_z) for chunk loading (transfer + junction). */
+    public List<BlockPos> listAllRailPositions() {
+        return database.withConnection(conn -> {
+            try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT DISTINCT world, rail_x, rail_z FROM detectors");
+                 ResultSet rs = ps.executeQuery()) {
+                List<BlockPos> list = new ArrayList<>();
+                while (rs.next()) list.add(new BlockPos(rs.getString("world"), rs.getInt("rail_x"), rs.getInt("rail_z")));
+                return list;
             }
         });
     }

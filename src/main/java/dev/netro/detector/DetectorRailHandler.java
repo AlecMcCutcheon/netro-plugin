@@ -177,15 +177,12 @@ public class DetectorRailHandler {
                     }
                 }
                 List<StationController> controllers = stationControllerRepo.findByStation(sd.getStationId());
-                String oppositeDir = oppositeDirection(dir);
-                // ROU:L clears TRA:R only on controllers for the chosen node; ROU:R clears TRA:L only on controllers for the chosen node. Add OFF first so dedupe keeps current-dir state.
-                if (oppositeDir != null && nextHop.isPresent()) {
+                // Reset controllers for the chosen hop to OFF first so state cannot stay softlocked ON from a previous direction; then direction logic sets TRA/NOT_TRA.
+                if (nextHop.isPresent()) {
                     String chosenNodeId = nextHop.get();
                     for (StationController c : controllers) {
-                        if (!c.getTargetNodeId().equals(chosenNodeId)) continue;
-                        boolean hasOpposite = stationControllerRuleMatches(c, oppositeDir, "TRANSFER", "TRANSFER+")
-                            || stationControllerRuleMatches(c, oppositeDir, "NOT_TRANSFER", "NOT_TRANSFER+");
-                        if (hasOpposite) bulbActions.add(new BulbAction(c.getWorld(), c.getX(), c.getY(), c.getZ(), false, 0));
+                        if (c.getTargetNodeId().equals(chosenNodeId))
+                            bulbActions.add(new BulbAction(c.getWorld(), c.getX(), c.getY(), c.getZ(), false, 0));
                     }
                 }
                 if (nextHop.isPresent()) {

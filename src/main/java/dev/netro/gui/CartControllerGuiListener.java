@@ -96,10 +96,15 @@ public class CartControllerGuiListener implements Listener {
         }
     }
 
-    /** Update stored cruise speed level to match a velocity magnitude (e.g. from MINV/MAXV). User sees updated speed in the GUI. */
+    /** Update stored cruise speed level to match a velocity magnitude (e.g. from MINV/MAXV). User sees updated speed in the GUI.
+     * If this cart had no state yet (player never opened GUI), set speed and turn cruise (Start) on so the cart keeps this V.
+     * If the cart already had state (e.g. speed set by MINV in the other direction), leave speed and cruise alone so the other direction's setting is preserved. */
     public void updateStoredSpeedFromMagnitude(String cartUuid, double magnitude) {
+        boolean hadState = stateByCart.containsKey(cartUuid);
+        if (hadState) return;
         CartControllerState s = stateByCart.computeIfAbsent(cartUuid, k -> new CartControllerState());
         s.setSpeedLevel(CartControllerState.speedLevelFromMagnitude(magnitude));
+        s.setCruiseActive(true);
     }
 
     private void applyCruiseSpeed(Minecart cart, CartControllerState state) {
@@ -115,10 +120,10 @@ public class CartControllerGuiListener implements Listener {
         cart.setVelocity(v.multiply(speed));
     }
 
-    /** Called when a detector/READY applied velocity so cruise yields (no zero; manual/detectors keep control). */
+    /** Called when a detector/READY applied velocity so cruise yields (stop mode; detectors/rails keep control). Ensures state exists so we can turn cruise off. */
     public void yieldCart(String cartUuid) {
-        CartControllerState s = stateByCart.get(cartUuid);
-        if (s != null) s.setCruiseActive(false);
+        CartControllerState s = stateByCart.computeIfAbsent(cartUuid, k -> new CartControllerState());
+        s.setCruiseActive(false);
     }
 
     private static Minecart findMinecartByUuid(String uuidStr) {
