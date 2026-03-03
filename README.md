@@ -59,4 +59,4 @@ Carts are stored in SQLite so routing, rules, and terminal state persist across 
 
 ## License
 
-See [LICENSE](LICENSE) in this repository.
+This project is licensed under the **Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)**. Use is allowed for **non-commercial purposes only**; you must give appropriate **attribution** (credit) to the author. See [LICENSE](LICENSE) in this repository.
