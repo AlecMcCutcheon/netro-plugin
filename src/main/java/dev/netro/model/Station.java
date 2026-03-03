@@ -34,18 +34,4 @@ public class Station {
     public int getSignY() { return signY; }
     public int getSignZ() { return signZ; }
     public long getCreatedAt() { return createdAt; }
-
-    /**
-     * Address prefix at given depth (1 = first tier, e.g. "2"; 3 = "2.4.7").
-     */
-    public String getAddressPrefix(int depth) {
-        String[] parts = address.split("\\.");
-        if (depth <= 0 || depth > parts.length) return address;
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < depth && i < parts.length; i++) {
-            if (i > 0) sb.append('.');
-            sb.append(parts[i]);
-        }
-        return sb.toString();
-    }
 }

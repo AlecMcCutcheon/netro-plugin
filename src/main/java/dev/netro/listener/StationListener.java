@@ -83,7 +83,7 @@ public class StationListener implements Listener {
             if (plugin.getChunkLoadService() != null)
                 plugin.getChunkLoadService().removeChunksForBlock(station.getWorld(), station.getSignX(), station.getSignZ());
             stationRepo.deleteById(station.getId());
-            event.getPlayer().sendMessage("Station removed (sign broken). Set up again with a new sign or /station create.");
+            event.getPlayer().sendMessage("Station removed (sign broken). Place a new [Station] sign to create a station again.");
         });
     }
 }

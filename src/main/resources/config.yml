@@ -1,10 +1,7 @@
 # Netro — Rail network plugin
 # https://github.com/your-repo/netro
 
-# Reroute timeout (seconds): after this long held at a blocked node, consider alternate route
-reroute-timeout-seconds: 30
-
-# Log detector events to console: direction (LEFT/RIGHT), role fired, and action taken (divert, not divert, ready, clear)
-detector-debug: false
+# Debug: detector and routing logs to console (direction, role, next-hop finalDest/localDest, block reasons)
+debug: false
 
 # Database is stored in plugins/Netro/netro.db (SQLite)

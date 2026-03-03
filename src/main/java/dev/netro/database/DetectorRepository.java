@@ -21,27 +21,26 @@ public class DetectorRepository {
     public void insert(Detector d) {
         database.withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO detectors (id, node_id, junction_id, world, x, y, z, rail_x, rail_y, rail_z, sign_facing, rule_1_role, rule_1_direction, rule_2_role, rule_2_direction, rule_3_role, rule_3_direction, rule_4_role, rule_4_direction, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+                "INSERT INTO detectors (id, node_id, world, x, y, z, rail_x, rail_y, rail_z, sign_facing, rule_1_role, rule_1_direction, rule_2_role, rule_2_direction, rule_3_role, rule_3_direction, rule_4_role, rule_4_direction, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
                 ps.setString(1, d.getId());
                 ps.setString(2, d.getNodeId());
-                ps.setString(3, d.getJunctionId());
-                ps.setString(4, d.getWorld());
-                ps.setInt(5, d.getX());
-                ps.setInt(6, d.getY());
-                ps.setInt(7, d.getZ());
-                ps.setInt(8, d.getRailX());
-                ps.setInt(9, d.getRailY());
-                ps.setInt(10, d.getRailZ());
-                ps.setString(11, d.getSignFacing());
-                ps.setString(12, d.getRule1Role());
-                ps.setObject(13, d.getRule1Direction());
-                ps.setObject(14, d.getRule2Role());
-                ps.setObject(15, d.getRule2Direction());
-                ps.setObject(16, d.getRule3Role());
-                ps.setObject(17, d.getRule3Direction());
-                ps.setObject(18, d.getRule4Role());
-                ps.setObject(19, d.getRule4Direction());
-                ps.setLong(20, System.currentTimeMillis());
+                ps.setString(3, d.getWorld());
+                ps.setInt(4, d.getX());
+                ps.setInt(5, d.getY());
+                ps.setInt(6, d.getZ());
+                ps.setInt(7, d.getRailX());
+                ps.setInt(8, d.getRailY());
+                ps.setInt(9, d.getRailZ());
+                ps.setString(10, d.getSignFacing());
+                ps.setString(11, d.getRule1Role());
+                ps.setObject(12, d.getRule1Direction());
+                ps.setObject(13, d.getRule2Role());
+                ps.setObject(14, d.getRule2Direction());
+                ps.setObject(15, d.getRule3Role());
+                ps.setObject(16, d.getRule3Direction());
+                ps.setObject(17, d.getRule4Role());
+                ps.setObject(18, d.getRule4Direction());
+                ps.setLong(19, System.currentTimeMillis());
                 ps.executeUpdate();
             }
             return null;
@@ -61,7 +60,7 @@ public class DetectorRepository {
     public Optional<Detector> findById(String id) {
         return database.withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT id, node_id, junction_id, world, x, y, z, rail_x, rail_y, rail_z, sign_facing, rule_1_role, rule_1_direction, rule_2_role, rule_2_direction, rule_3_role, rule_3_direction, rule_4_role, rule_4_direction FROM detectors WHERE id = ?")) {
+                "SELECT id, node_id, world, x, y, z, rail_x, rail_y, rail_z, sign_facing, rule_1_role, rule_1_direction, rule_2_role, rule_2_direction, rule_3_role, rule_3_direction, rule_4_role, rule_4_direction FROM detectors WHERE id = ?")) {
                 ps.setString(1, id);
                 try (ResultSet rs = ps.executeQuery()) {
                     return rs.next() ? Optional.of(rowToDetector(rs)) : Optional.empty();
@@ -70,7 +69,7 @@ public class DetectorRepository {
         });
     }
 
-    /** All detector rail positions (world, rail_x, rail_z) for chunk loading (transfer + junction). */
+    /** All detector rail positions (world, rail_x, rail_z) for chunk loading. */
     public List<BlockPos> listAllRailPositions() {
         return database.withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(
@@ -87,7 +86,7 @@ public class DetectorRepository {
     public List<Detector> findByRail(String world, int railX, int railY, int railZ) {
         return database.withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT id, node_id, junction_id, world, x, y, z, rail_x, rail_y, rail_z, sign_facing, rule_1_role, rule_1_direction, rule_2_role, rule_2_direction, rule_3_role, rule_3_direction, rule_4_role, rule_4_direction FROM detectors WHERE world = ? AND ( (rail_x = ? AND rail_y = ? AND rail_z = ?) OR (x = ? AND y = ? AND z = ?) OR (x = ? AND y = ? AND z = ?) OR (x = ? AND y = ? AND z = ?) OR (x = ? AND y = ? AND z = ?) )")) {
+                "SELECT id, node_id, world, x, y, z, rail_x, rail_y, rail_z, sign_facing, rule_1_role, rule_1_direction, rule_2_role, rule_2_direction, rule_3_role, rule_3_direction, rule_4_role, rule_4_direction FROM detectors WHERE world = ? AND ( (rail_x = ? AND rail_y = ? AND rail_z = ?) OR (x = ? AND y = ? AND z = ?) OR (x = ? AND y = ? AND z = ?) OR (x = ? AND y = ? AND z = ?) OR (x = ? AND y = ? AND z = ?) )")) {
                 ps.setString(1, world);
                 ps.setInt(2, railX);
                 ps.setInt(3, railY);
@@ -116,7 +115,7 @@ public class DetectorRepository {
     public List<Detector> findByNodeId(String nodeId) {
         return database.withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT id, node_id, junction_id, world, x, y, z, rail_x, rail_y, rail_z, sign_facing, rule_1_role, rule_1_direction, rule_2_role, rule_2_direction, rule_3_role, rule_3_direction, rule_4_role, rule_4_direction FROM detectors WHERE node_id = ?")) {
+                "SELECT id, node_id, world, x, y, z, rail_x, rail_y, rail_z, sign_facing, rule_1_role, rule_1_direction, rule_2_role, rule_2_direction, rule_3_role, rule_3_direction, rule_4_role, rule_4_direction FROM detectors WHERE node_id = ?")) {
                 ps.setString(1, nodeId);
                 try (ResultSet rs = ps.executeQuery()) {
                     List<Detector> list = new ArrayList<>();
@@ -131,7 +130,7 @@ public class DetectorRepository {
     public Optional<Detector> findByBlock(String world, int x, int y, int z) {
         return database.withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT id, node_id, junction_id, world, x, y, z, rail_x, rail_y, rail_z, sign_facing, rule_1_role, rule_1_direction, rule_2_role, rule_2_direction, rule_3_role, rule_3_direction, rule_4_role, rule_4_direction FROM detectors WHERE world = ? AND x = ? AND y = ? AND z = ?")) {
+                "SELECT id, node_id, world, x, y, z, rail_x, rail_y, rail_z, sign_facing, rule_1_role, rule_1_direction, rule_2_role, rule_2_direction, rule_3_role, rule_3_direction, rule_4_role, rule_4_direction FROM detectors WHERE world = ? AND x = ? AND y = ? AND z = ?")) {
                 ps.setString(1, world);
                 ps.setInt(2, x);
                 ps.setInt(3, y);
@@ -147,7 +146,6 @@ public class DetectorRepository {
         return new Detector(
             rs.getString("id"),
             rs.getString("node_id"),
-            rs.getString("junction_id"),
             rs.getString("world"),
             rs.getInt("x"), rs.getInt("y"), rs.getInt("z"),
             rs.getInt("rail_x"), rs.getInt("rail_y"), rs.getInt("rail_z"),

@@ -2,21 +2,35 @@ package dev.netro.util;
 
 import net.md_5.bungee.api.chat.BaseComponent;
 import net.md_5.bungee.api.chat.ClickEvent;
+import net.md_5.bungee.api.chat.ComponentBuilder;
 import net.md_5.bungee.api.chat.TextComponent;
 import org.bukkit.Material;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.BookMeta;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
- * Builds the Netro in-game guide book using Spigot's BookMeta.Spigot() and
- * BaseComponent[] so pages are serialized correctly (not shown as raw JSON).
- * Page limit ~256 chars per page; use CHANGE_PAGE for ToC (keeps book open).
+ * Builds the Netro in-game guide book. Content matches docs/GUIDE.md.
+ * Page 1 = clickable table of contents; remaining pages = formatted guide text.
+ * Uses ~380 chars per content page for readable line count (~12–14 lines).
  */
 public final class NetroBook {
 
+    /** Target chars per content page so each page shows ~12–14 lines. */
+    private static final int CHARS_PER_PAGE = 380;
+
+    /** Color: dark gray/black only. §8 = dark gray, §0 = black, §r = reset. */
+    private static final String C_TITLE = "§8§l§n";
+    private static final String C_SECT  = "§8";
+    private static final String C_BODY  = "§8";
+    private static final String C_RESET = "§r";
+    private static final String C_LINK  = "§8";
+
     private NetroBook() {}
 
-    /** Creates one written book. Page numbers in ToC links are 1-based. */
+    /** Creates one written guide book with clickable TOC. */
     public static ItemStack createGuideBook() {
         ItemStack item = new ItemStack(Material.WRITTEN_BOOK);
         BookMeta meta = (BookMeta) item.getItemMeta();
@@ -25,319 +39,182 @@ public final class NetroBook {
         meta.setTitle("Netro Guide");
         meta.setAuthor("Netro");
 
-        // Use Spigot's component API so the client gets proper format, not raw strings
-        meta.spigot().setPages(
-            page1Title(),
-            page2Toc(),
-            page3HowItWorks1(),
-            page4HowItWorks2(),
-            page5Signals1(),
-            page6Signals2(),
-            page7SetupStation(),
-            page8SetupTransfer(),
-            page8SetupTransfer2(),
-            page9Wands(),
-            page10CauseEffect1(),
-            page11CauseEffect2(),
-            page12JunctionRule()
-        );
+        List<String> contentPages = buildContentPages();
+        int[] sectionStartPage = sectionStartPages(contentPages);
+
+        BaseComponent[][] allPages = new BaseComponent[1 + contentPages.size()][];
+        allPages[0] = buildTocPage(sectionStartPage);
+        for (int i = 0; i < contentPages.size(); i++) {
+            allPages[1 + i] = new BaseComponent[]{ new TextComponent(contentPages.get(i)) };
+        }
+        meta.spigot().setPages(allPages);
 
         item.setItemMeta(meta);
         return item;
     }
 
-    private static BaseComponent[] page1Title() {
-        return new BaseComponent[]{
-            new TextComponent(
-                "Netro Guide\n\n" +
-                "Rail network: stations,\n" +
-                "transfer nodes, junctions.\n" +
-                "Detectors & controllers\n" +
-                "on copper bulbs.\n\n" +
-                "Use the table of\n" +
-                "contents (next page)\n" +
-                "to jump to sections."
-            )
+    /** Build TOC page with clickable links. Page numbers are 1-based; section N links to sectionStartPage[N]. */
+    private static BaseComponent[] buildTocPage(int[] sectionStartPage) {
+        String[] titles = {
+            "1. What Netro Is",
+            "2. Concepts",
+            "3. Setting Up a Station",
+            "4. Detectors and Nodes",
+            "5. Controllers",
+            "6. Terminals: ENTRY, CLEAR, READY, RELEASE",
+            "7. Pairing Transfer Nodes",
+            "8. Rules UI and Creating Rules",
+            "9. Cart Controller and Destinations",
+            "10. Commands",
+            "11. Summary: Entry/Clear vs Ready/Release"
         };
+        ComponentBuilder cb = new ComponentBuilder("");
+        cb.append(C_TITLE + "Netro Guide" + C_RESET).append("\n\n");
+        cb.append(C_SECT + "Table of Contents" + C_RESET).append("\n\n");
+        for (int i = 0; i < titles.length && i < sectionStartPage.length; i++) {
+            int page = sectionStartPage[i];
+            String title = titles[i];
+            cb.append(C_LINK + title + C_RESET)
+                .event(new ClickEvent(ClickEvent.Action.CHANGE_PAGE, String.valueOf(page)));
+            cb.append("\n");
+        }
+        return cb.create();
     }
 
-    private static BaseComponent[] page2Toc() {
-        return new BaseComponent[]{
-            new TextComponent("Contents\n\n"),
-            link("How it works", 3),
-            new TextComponent("\n"),
-            link("Signals & shorthand", 5),
-            new TextComponent("\n"),
-            link("Setup: station", 7),
-            new TextComponent("\n"),
-            link("Setup: transfer", 8),
-            new TextComponent("\n"),
-            link("Wands", 10),
-            new TextComponent("\n"),
-            link("Cause & effect", 11),
-            new TextComponent("\n"),
-            link("Junction rule", 13)
-        };
+    /** Determine 1-based page number where each section starts. Page 1 = TOC; first content page = 2. */
+    private static int[] sectionStartPages(List<String> contentPages) {
+        int[] start = new int[11];
+        for (int s = 1; s <= 11; s++) {
+            String header = C_SECT + s + ". ";
+            for (int i = 0; i < contentPages.size(); i++) {
+                String page = contentPages.get(i);
+                if (page.startsWith(header) || page.contains("\n" + header)) {
+                    start[s - 1] = i + 2; // 1-based; page 2 = first content page
+                    break;
+                }
+            }
+            if (start[s - 1] == 0) start[s - 1] = 2;
+        }
+        return start;
     }
 
-    private static TextComponent link(String label, int pageNumber) {
-        TextComponent t = new TextComponent(label);
-        t.setClickEvent(new ClickEvent(ClickEvent.Action.CHANGE_PAGE, String.valueOf(pageNumber)));
-        t.setUnderlined(true);
-        t.setColor(net.md_5.bungee.api.ChatColor.DARK_BLUE);
-        return t;
+    private static List<String> buildContentPages() {
+        String full = getFullGuideText();
+        return splitIntoPages(full, CHARS_PER_PAGE);
     }
 
-    private static BaseComponent[] page3HowItWorks1() {
-        return new BaseComponent[]{
-            new TextComponent(
-                "How it works\n\n" +
-                "Netro splits work into\n" +
-                "two parts:\n\n" +
-                "The plugin decides:\n" +
-                "• Where the cart goes\n" +
-                "  next (routing).\n" +
-                "• When it is safe to\n" +
-                "  hold or release it.\n" +
-                "• Which direction the\n" +
-                "  cart is traveling.\n\n" +
-                "The plugin never moves\n" +
-                "rails or powers them\n" +
-                "directly. It only\n" +
-                "toggles copper bulbs."
-            )
-        };
+    /**
+     * Split content into pages so section boundaries (--- and section titles) always start at the top of a page.
+     * If a section boundary falls within the current page window, we end the page before it so the next page starts with the section header.
+     */
+    private static List<String> splitIntoPages(String text, int maxChars) {
+        List<String> pages = new ArrayList<>();
+        int start = 0;
+        final String sectionSep = "\n\n---\n\n";
+        while (start < text.length()) {
+            int end = Math.min(start + maxChars, text.length());
+            if (end < text.length()) {
+                int lastNewline = text.lastIndexOf('\n', end);
+                if (lastNewline > start) end = lastNewline + 1;
+                // If a section boundary is in this page, end the page before it so the section title starts at top of next page
+                int sep = text.indexOf(sectionSep, start);
+                if (sep >= start && sep < end) {
+                    end = sep;
+                }
+            }
+            // Avoid infinite loop: if section separator is at start, end would equal start and we'd never advance
+            if (end <= start) {
+                start = start + sectionSep.length();
+                continue;
+            }
+            String page = text.substring(start, end).trim();
+            if (!page.isEmpty()) pages.add(page);
+            start = end;
+        }
+        return pages;
     }
 
-    private static BaseComponent[] page4HowItWorks2() {
-        return new BaseComponent[]{
-            new TextComponent(
-                "What you do:\n\n" +
-                "• Build the track,\n" +
-                "  sidings, and switches.\n" +
-                "• Place copper bulbs\n" +
-                "  and signs so the\n" +
-                "  plugin knows what is\n" +
-                "  a detector and what\n" +
-                "  is a controller.\n" +
-                "• Wire each bulb to\n" +
-                "  your redstone (the\n" +
-                "  switch, the gate).\n\n" +
-                "Why? So you choose\n" +
-                "how to build. The\n" +
-                "plugin only says \"turn\n" +
-                "this bulb on or off\";\n" +
-                "your circuit does the\n" +
-                "rest."
-            )
-        };
-    }
-
-    private static BaseComponent[] page5Signals1() {
-        return new BaseComponent[]{
-            new TextComponent(
-                "Signals & shorthand\n\n" +
-                "A detector is a copper\n" +
-                "bulb + sign: you tell\n" +
-                "the plugin \"a cart\n" +
-                "passed here.\" The\n" +
-                "plugin uses that for\n" +
-                "segment occupancy and\n" +
-                "(at junctions) to drive\n" +
-                "controller bulbs.\n\n" +
-                "Sign line 1: [Transfer]\n" +
-                "= transfer boundary\n" +
-                "(one per node); [Terminal]\n" +
-                "= terminal; [Junction]\n" +
-                "= junction side. Or\n" +
-                "[Detector] = generic.\n" +
-                "[Controller] = bulb\n" +
-                "plugin drives (junctions,\n" +
-                "terminals). Valid signs\n" +
-                "get colored by the plugin."
-            )
-        };
-    }
-
-    private static BaseComponent[] page6Signals2() {
-        return new BaseComponent[]{
-            new TextComponent(
-                "Detector roles: ENT=\n" +
-                "ENTRY, REA=READY,\n" +
-                "CLE=CLEAR. :L/:R =\n" +
-                "LEFT/RIGHT. Transfer\n" +
-                "nodes only use ENT and\n" +
-                "CLE (segment boundary).\n\n" +
-                "Controller roles (used\n" +
-                "at junctions, and at\n" +
-                "terminals for queues):\n" +
-                "DIV=DIVERT, NOD=\n" +
-                "NOT_DIVERT, REL=RELEASE.\n" +
-                "+ means CLEAR turns it\n" +
-                "off. Station-level:\n" +
-                "TRANSFER, NOT_TRANSFER.\n" +
-                "Rest of book uses these."
-            )
-        };
-    }
-
-    private static BaseComponent[] page7SetupStation() {
-        return new BaseComponent[]{
-            new TextComponent(
-                "Setup: Station\n\n" +
-                "A station is a named\n" +
-                "place (e.g. CentralHub).\n" +
-                "The plugin gives it an\n" +
-                "address from world\n" +
-                "coords so carts can\n" +
-                "route there.\n\n" +
-                "1. Place a sign.\n" +
-                "2. Line 1: [Station]\n" +
-                "3. Line 2: station name\n\n" +
-                "Address appears on the\n" +
-                "sign. Use /station info\n" +
-                "for details. You need\n" +
-                "a station before any\n" +
-                "transfer nodes at it."
-            )
-        };
-    }
-
-    private static BaseComponent[] page8SetupTransfer() {
-        return new BaseComponent[]{
-            new TextComponent(
-                "Setup: Transfer\n\n" +
-                "A transfer node is one\n" +
-                "end of a link between\n" +
-                "two stations. One sign\n" +
-                "per node.\n\n" +
-                "1. Copper bulb by the\n" +
-                "   rail at the boundary.\n" +
-                "2. Sign: Line 1 [Transfer]\n" +
-                "   Line 2 Station:Node\n" +
-                "   Lines 3-4 ENT:L CLE:R\n\n" +
-                "If the node doesn't exist\n" +
-                "yet but the station does,\n" +
-                "placing the sign creates\n" +
-                "the node. Errors show in\n" +
-                "chat only."
-            )
-        };
-    }
-
-    private static BaseComponent[] page8SetupTransfer2() {
-        return new BaseComponent[]{
-            new TextComponent(
-                "Setup: Transfer (cont.)\n\n" +
-                "DIV, NOD, REL are for\n" +
-                "junctions and terminals.\n" +
-                "Transfer = ENT/CLE only.\n\n" +
-                "Terminal: [Terminal] sign\n" +
-                "with Station:Node; add\n" +
-                "READY/RELEASE for queue.\n" +
-                "Same create-on-first.\n\n" +
-                "Junction: Line 2 = junction\n" +
-                "name. First detector\n" +
-                "creates the junction.\n\n" +
-                "3. Pair with pairing wand\n" +
-                "   (click each end). Link\n" +
-                "   is then live."
-            )
-        };
-    }
-
-    private static BaseComponent[] page9Wands() {
-        return new BaseComponent[]{
-            new TextComponent(
-                "Wands\n\n" +
-                "/netro pairingwand:\n" +
-                "Get the wand, then click\n" +
-                "transfer detector A,\n" +
-                "then transfer detector B.\n" +
-                "That links the two nodes\n" +
-                "so carts can route between\n" +
-                "them. No typing names.\n\n" +
-                "/netro segmentwand:\n" +
-                "Click transfer A, then\n" +
-                "junction detector(s) in\n" +
-                "order, then transfer B.\n" +
-                "Tells the plugin which\n" +
-                "junctions are on that\n" +
-                "segment. /absorb wand:\n" +
-                "click signs to re-register\n" +
-                "after DB reset or move."
-            )
-        };
-    }
-
-    private static BaseComponent[] page10CauseEffect1() {
-        return new BaseComponent[]{
-            new TextComponent(
-                "Cause & effect\n\n" +
-                "At a transfer node:\n" +
-                "only ENT and CLE matter.\n" +
-                "They tell the plugin\n" +
-                "when a cart entered or\n" +
-                "left the segment (for\n" +
-                "traffic). No DIV/REL\n" +
-                "there.\n\n" +
-                "At a junction (siding\n" +
-                "between two nodes):\n" +
-                "ENT:L/R fires -> plugin\n" +
-                "decides divert or not,\n" +
-                "sets DIV:L/R and NOD:L/R\n" +
-                "on [Controller] bulbs so\n" +
-                "your redstone throws the\n" +
-                "switch. REA (cart stopped\n" +
-                "in junction) -> when safe,\n" +
-                "plugin turns REL on so\n" +
-                "you can open the gate."
-            )
-        };
-    }
-
-    private static BaseComponent[] page11CauseEffect2() {
-        return new BaseComponent[]{
-            new TextComponent(
-                "Cause & effect (cont.)\n\n" +
-                "CLE (cart left junction\n" +
-                "or terminal): Plugin\n" +
-                "turns DIV+, NOD+, and\n" +
-                "REL OFF so the bulb\n" +
-                "resets. CLE never turns\n" +
-                "a controller ON; it only\n" +
-                "turns the + roles and\n" +
-                "RELEASE off. Your switch\n" +
-                "returns to default until\n" +
-                "the next cart.\n\n" +
-                "Terminals: can have\n" +
-                "READY/RELEASE for their\n" +
-                "arrival/departure queue.\n" +
-                "Same idea: REA -> REL on\n" +
-                "when safe; CLE -> REL off."
-            )
-        };
-    }
-
-    private static BaseComponent[] page12JunctionRule() {
-        return new BaseComponent[]{
-            new TextComponent(
-                "Junction rule\n\n" +
-                "A junction is a siding\n" +
-                "between two transfer\n" +
-                "nodes so two carts can\n" +
-                "pass. When you register\n" +
-                "the segment with the\n" +
-                "segment wand, order\n" +
-                "matters: only connect\n" +
-                "RIGHT of one junction to\n" +
-                "LEFT of the next (and\n" +
-                "vice versa). That keeps\n" +
-                "the path A - J1 - J2 - B\n" +
-                "clear so the plugin\n" +
-                "knows who is \"past\" the\n" +
-                "junction for traffic."
-            )
-        };
+    /** Section headers use C_SECT; body uses C_BODY; newlines for paragraphs. */
+    private static String getFullGuideText() {
+        return ""
+            + C_SECT + "1. What Netro Is" + C_RESET + "\n\n"
+            + C_BODY + "Netro is a Minecraft (Bukkit/Spigot 1.21) plugin for rail networks: stations, transfer nodes, terminals, and cart routing.\n\n"
+            + "It lets you: define stations with hierarchical addresses (e.g. 2.4.7.3); attach transfer nodes and terminals to stations; use detector rails and copper bulbs with signs to trigger rules; route carts by destination with on-the-fly shortest path.\n\n"
+            + "Carts are tracked in a database (SQLite) so routing and terminal state persist across chunk loads and restarts. There is no collision detection; dispatch is only blocked when the destination node is full or invalid." + C_RESET + "\n\n"
+            + "---\n\n"
+            + C_SECT + "2. Concepts" + C_RESET + "\n\n"
+            + C_BODY + "Station: A named location with a unique address. Created by placing a sign.\n\n"
+            + "Transfer node: A switch at a station that can be paired to another at another station. Carts are routed via that pair.\n\n"
+            + "Terminal: A parking slot at a station (0-based index). A cart's destination can be a station or a specific terminal.\n\n"
+            + "Detector: A sign on a copper bulb next to a rail. When a cart passes, the detector fires with a role and direction.\n\n"
+            + "Controller: A sign on a copper bulb turned ON/OFF by rules (e.g. RELEASE, RULE:N).\n\n"
+            + "Rules: Stored per node. Each rule has a trigger (ENTERING, CLEARING, DETECTED, BLOCKED), optional destination condition, and an action (set speed, SEND_ON/OFF, set rail state, set destination)." + C_RESET + "\n\n"
+            + "---\n\n"
+            + C_SECT + "3. Setting Up a Station" + C_RESET + "\n\n"
+            + C_BODY + "Stations are created and removed only by signs.\n\n"
+            + "1) Place a wall sign where you want the station.\n"
+            + "2) Line 1: [Station]\n"
+            + "3) Line 2: Station name (e.g. Hub, Snowy2). Must be unique.\n"
+            + "4) Finish editing.\n\n"
+            + "The plugin assigns an address from the sign position and writes it on the sign. Breaking the sign removes the station. The plugin keeps chunks loaded for detector rails as needed." + C_RESET + "\n\n"
+            + "---\n\n"
+            + C_SECT + "4. Detectors and Nodes" + C_RESET + "\n\n"
+            + C_BODY + "Detectors are signs on copper bulbs adjacent to a rail. The sign's first line sets the type.\n\n"
+            + "[Transfer] Line 2 = StationName:NodeName. Boundary for a transfer node. Roles: ENTRY, CLEAR.\n\n"
+            + "[Terminal] Line 2 = StationName:NodeName. Boundary for a terminal. Roles: ENTRY, CLEAR, READY (one READY per terminal).\n\n"
+            + "[Detector] Line 2 = StationName:NodeName or node name. Generic detector. Roles: ENTRY, READY, CLEAR.\n\n"
+            + "Line 2 for [Transfer]/[Terminal] must be StationName:NodeName. The copper bulb must be next to a rail. Breaking the sign or bulb unregisters the detector.\n\n"
+            + "Roles (lines 3–4): Space-separated. Add direction (L/R) so the role only fires when the cart moves that way. Shorthand: ENT, REA, CLE, REL.\n\n"
+            + "ENTRY: Fires when entering the node. CLEAR: Fires when leaving; direction is respected. READY: (Terminals only.) Holds the cart; used with RELEASE. RELEASE: On controller signs; turned ON when the plugin releases a cart." + C_RESET + "\n\n"
+            + "---\n\n"
+            + C_SECT + "5. Controllers" + C_RESET + "\n\n"
+            + C_BODY + "A controller is a sign on a copper bulb that the plugin powers ON or OFF.\n\n"
+            + "RELEASE: Turns ON controllers with REL when releasing the next cart from a terminal. Wire to your release mechanism.\n\n"
+            + "RULE:N: When a rule with SEND_ON or SEND_OFF fires, controllers with RULE:N for that node are set ON or OFF. Optional :L/:R for direction.\n\n"
+            + "Controller sign: Line 1 [Controller], Line 2 StationName:NodeName. Lines 3–4: at least one of REL or RULE:N." + C_RESET + "\n\n"
+            + "---\n\n"
+            + C_SECT + "6. Terminals: ENTRY, CLEAR, READY, RELEASE" + C_RESET + "\n\n"
+            + C_BODY + "Terminals are parking slots. Flow:\n\n"
+            + "1) ENTRY: Cart passes in entering direction. No slot booking; used for rules.\n\n"
+            + "2) READY: Cart passes the READY detector. Plugin: increments held count; marks cart held; if destination is this terminal, clears destination; if first in line and dispatch allowed, turns RELEASE ON; brief center hold.\n\n"
+            + "3) CLEAR: Cart passes in clearing direction. Plugin: decrements held count; clears held state; turns OFF RELEASE; may turn RELEASE ON for the next cart.\n\n"
+            + "READY = cart held in slot. RELEASE = power release mechanism. CLEAR = cart left, update state." + C_RESET + "\n\n"
+            + "---\n\n"
+            + C_SECT + "7. Pairing Transfer Nodes" + C_RESET + "\n\n"
+            + C_BODY + "Transfer nodes at two stations can be paired. Routing uses pairs to compute paths.\n\n"
+            + "1) /netro railroadcontroller, then right-click the [Station] sign.\n"
+            + "2) Click the transfer node, then Open rules.\n"
+            + "3) Click Pair transfer node..., choose the other station and node, confirm.\n\n"
+            + "Unpair in the same Rules UI. Routing is on the fly; no rebuild needed." + C_RESET + "\n\n"
+            + "---\n\n"
+            + C_SECT + "8. Rules UI and Creating Rules" + C_RESET + "\n\n"
+            + C_BODY + "Open Rules: Sneak + right-click a [Transfer] or [Terminal] sign. Or: Railroad Controller → right-click [Station] → click node → Open rules.\n\n"
+            + "Layout: Slots 0–44 = rules. Slot 45 = default blocked policy. Slot 46 = Pair (transfer only). Slot 49 = Create rule. Slot 53 = Close.\n\n"
+            + "Create rule: Trigger → Destination → Action.\n\n"
+            + "Trigger: When cart enters (ENTERING); when cart clears (CLEARING); when terminal blocked (BLOCKED); when cart detected (DETECTED).\n\n"
+            + "Destination: Going to / not going to a destination; any destination; not any destination.\n\n"
+            + "Action: Turn bulb ON/OFF (SEND_ON/SEND_OFF); Set rail state; Set cart speed (cruise). For BLOCKED, use Set destination to a redirect." + C_RESET + "\n\n"
+            + "---\n\n"
+            + C_SECT + "9. Cart Controller and Destinations" + C_RESET + "\n\n"
+            + C_BODY + "Cart Controller: /netro cartcontroller. Right-click a cart to open the menu: set destination (station or station:terminal); Stop/Start cruise; adjust speed (1–10).\n\n"
+            + "Command: /netro setdestination <address|name|Station:Terminal>. Examples: 2.4.7.3, Snowy2, Snowy2:0.\n\n"
+            + "Carts without a destination may be assigned one when they pass a detector, or removed from tracking if no terminals." + C_RESET + "\n\n"
+            + "---\n\n"
+            + C_SECT + "10. Commands" + C_RESET + "\n\n"
+            + C_BODY + "All under /netro:\n\n"
+            + "debug – Toggle debug logging.\n"
+            + "guide – Give this book.\n"
+            + "station list – List stations.\n"
+            + "setdestination – Set a cart's destination.\n"
+            + "dns – Address lookup.\n"
+            + "cartcontroller – Give Cart Controller.\n"
+            + "railroadcontroller – Give Railroad Controller." + C_RESET + "\n\n"
+            + "---\n\n"
+            + C_SECT + "11. Summary: Entry/Clear vs Ready/Release" + C_RESET + "\n\n"
+            + C_BODY + "ENTRY/CLEAR on a detector sign define when the detector fires (by direction). ENTERING/CLEARING in rules match those events.\n\n"
+            + "READY (one per terminal) = cart held at that slot.\n\n"
+            + "RELEASE on a controller = power the release mechanism.\n\n"
+            + "CLEAR = cart left the slot; count decremented; next cart may get RELEASE.\n\n"
+            + "ENTRY → entering; READY → held in slot; RELEASE → mechanism on; CLEAR → left, update state." + C_RESET;
     }
 }

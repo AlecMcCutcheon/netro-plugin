@@ -16,71 +16,45 @@ import java.util.List;
 public class NetroCommand implements CommandExecutor, TabCompleter {
 
     private static final List<String> SUBCOMMANDS = Arrays.asList(
-        "detectordebug", "routingdebug", "routinglog", "pairingwand", "segmentwand", "book", "guide"
+        "debug", "guide",
+        "station", "setdestination", "dns", "cartcontroller", "railroadcontroller"
     );
 
     private final NetroPlugin plugin;
+    private final StationCommand stationCommand;
+    private final SetDestinationCommand setDestinationCommand;
+    private final DnsCommand dnsCommand;
+    private final CartControllerCommand cartControllerCommand;
+    private final RailroadControllerCommand railroadControllerCommand;
 
-    public NetroCommand(NetroPlugin plugin) {
+    public NetroCommand(NetroPlugin plugin, StationCommand stationCommand,
+                        SetDestinationCommand setDestinationCommand, DnsCommand dnsCommand,
+                        CartControllerCommand cartControllerCommand,
+                        RailroadControllerCommand railroadControllerCommand) {
         this.plugin = plugin;
+        this.stationCommand = stationCommand;
+        this.setDestinationCommand = setDestinationCommand;
+        this.dnsCommand = dnsCommand;
+        this.cartControllerCommand = cartControllerCommand;
+        this.railroadControllerCommand = railroadControllerCommand;
     }
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        if (args.length > 0 && "detectordebug".equalsIgnoreCase(args[0])) {
-            boolean now = !plugin.isDetectorDebugEnabled();
-            plugin.setDetectorDebug(now);
-            sender.sendMessage("Detector debug is now " + (now ? "on" : "off") + ". Logs go to the server console.");
+        if (args.length == 0) {
+            sender.sendMessage("Usage: /netro <subcommand> [args]. Subcommands: debug, guide, station, setdestination, dns, cartcontroller, railroadcontroller");
             return true;
         }
-        if (args.length > 0 && "routingdebug".equalsIgnoreCase(args[0])) {
-            boolean now = !plugin.isRoutingDebugEnabled();
-            plugin.setRoutingDebug(now);
-            sender.sendMessage("Routing debug is now " + (now ? "on" : "off") + ". Next-hop decisions and block reasons go to the server console.");
+        String sub = args[0].toLowerCase();
+        String[] subArgs = args.length > 1 ? Arrays.copyOfRange(args, 1, args.length) : new String[0];
+
+        if ("debug".equals(sub)) {
+            boolean now = !plugin.isDebugEnabled();
+            plugin.setDebug(now);
+            sender.sendMessage("Debug is now " + (now ? "on" : "off") + ". Detector and routing logs go to the server console.");
             return true;
         }
-        if (args.length >= 2 && "routinglog".equalsIgnoreCase(args[0])) {
-            String cartUuid = args[1];
-            java.util.List<java.util.Map<String, Object>> list = plugin.getAPI().getLastRoutingDecisions(cartUuid, 5);
-            if (list.isEmpty()) {
-                sender.sendMessage("No routing decisions found for cart " + cartUuid);
-            } else {
-                for (int i = 0; i < list.size(); i++) {
-                    java.util.Map<String, Object> row = list.get(i);
-                    String line = String.format("[%d] station=%s preferred=%s chosen=%s canDispatch=%s dest=%s",
-                        i + 1,
-                        row.get("station_id"),
-                        row.get("preferred_node_id"),
-                        row.get("chosen_node_id"),
-                        row.get("can_dispatch"),
-                        row.get("destination_address"));
-                    if (row.get("block_reason") != null && !((String) row.get("block_reason")).isEmpty()) {
-                        line += " reason=" + row.get("block_reason");
-                    }
-                    sender.sendMessage(line);
-                }
-            }
-            return true;
-        }
-        if (args.length > 0 && "pairingwand".equalsIgnoreCase(args[0])) {
-            if (!(sender instanceof org.bukkit.entity.Player player)) {
-                sender.sendMessage("Only players can receive the pairing wand.");
-                return true;
-            }
-            player.getInventory().addItem(plugin.getLinkWandListener().createPairingWand());
-            sender.sendMessage("You received the Pairing Wand. Click a transfer detector, then the other station's transfer detector to pair.");
-            return true;
-        }
-        if (args.length > 0 && "segmentwand".equalsIgnoreCase(args[0])) {
-            if (!(sender instanceof org.bukkit.entity.Player player)) {
-                sender.sendMessage("Only players can receive the segment wand.");
-                return true;
-            }
-            player.getInventory().addItem(plugin.getLinkWandListener().createSegmentWand());
-            sender.sendMessage("You received the Segment Wand. Click transfer A → junction detector(s) → transfer B to register segment.");
-            return true;
-        }
-        if (args.length > 0 && ("book".equalsIgnoreCase(args[0]) || "guide".equalsIgnoreCase(args[0]))) {
+        if ("guide".equals(sub)) {
             if (!(sender instanceof org.bukkit.entity.Player player)) {
                 sender.sendMessage("Only players can receive the guide book.");
                 return true;
@@ -89,21 +63,31 @@ public class NetroCommand implements CommandExecutor, TabCompleter {
             sender.sendMessage("You received the Netro Guide. Use the table of contents to jump to sections.");
             return true;
         }
-        sender.sendMessage("Usage: /netro detectordebug | routingdebug | routinglog <cart_uuid> | pairingwand | segmentwand | book");
+        String subLabel = "netro " + sub;
+        if ("station".equals(sub)) return stationCommand.onCommand(sender, command, subLabel, subArgs);
+        if ("setdestination".equals(sub)) return setDestinationCommand.onCommand(sender, command, subLabel, subArgs);
+        if ("dns".equals(sub)) return dnsCommand.onCommand(sender, command, subLabel, subArgs);
+        if ("cartcontroller".equals(sub)) return cartControllerCommand.onCommand(sender, command, subLabel, subArgs);
+        if ("railroadcontroller".equals(sub)) return railroadControllerCommand.onCommand(sender, command, subLabel, subArgs);
+
+        sender.sendMessage("Unknown subcommand. Use: /netro debug | guide | station | setdestination | dns | cartcontroller | railroadcontroller");
         return true;
     }
 
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
-        if (args.length == 0) {
-            return new ArrayList<>(SUBCOMMANDS);
-        }
+        if (args.length == 0) return new ArrayList<>(SUBCOMMANDS);
         if (args.length == 1) {
             List<String> out = new ArrayList<>();
             StringUtil.copyPartialMatches(args[0], SUBCOMMANDS, out);
             Collections.sort(out);
             return out;
         }
-        return Collections.emptyList();
+        String sub = args[0].toLowerCase();
+        String[] subArgs = Arrays.copyOfRange(args, 1, args.length);
+        String subLabel = "netro " + sub;
+        if ("station".equals(sub)) return stationCommand.onTabComplete(sender, command, subLabel, subArgs);
+        if ("dns".equals(sub)) return dnsCommand.onTabComplete(sender, command, subLabel, subArgs);
+        return List.of();
     }
 }

@@ -2,7 +2,6 @@ package dev.netro.database;
 
 import dev.netro.model.Station;
 
-import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -126,17 +125,6 @@ public class StationRepository {
                 rs.close();
                 return c;
             }
-        });
-    }
-
-    public void updateAddress(String stationId, String newAddress) {
-        database.withConnection(conn -> {
-            try (PreparedStatement ps = conn.prepareStatement("UPDATE stations SET address = ? WHERE id = ?")) {
-                ps.setString(1, newAddress);
-                ps.setString(2, stationId);
-                ps.executeUpdate();
-            }
-            return null;
         });
     }
 

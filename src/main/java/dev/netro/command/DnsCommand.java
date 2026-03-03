@@ -42,7 +42,7 @@ public class DnsCommand implements CommandExecutor, TabCompleter {
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (args.length == 0) {
-            sender.sendMessage("Usage: /dns list | list cluster | list main <n> | <address|name>");
+            sender.sendMessage("Usage: /" + label + " list | list cluster | list main <n> | <address|name>");
             return true;
         }
 
@@ -69,7 +69,7 @@ public class DnsCommand implements CommandExecutor, TabCompleter {
             try {
                 mainnet = Integer.parseInt(mainArg);
             } catch (NumberFormatException e) {
-                sender.sendMessage("Usage: /dns list main <number>");
+                sender.sendMessage("Usage: /" + label + " list main <number>");
                 return true;
             }
             List<Station> stations = stationRepo.findByAddressPrefix(String.valueOf(mainnet));
@@ -81,7 +81,7 @@ public class DnsCommand implements CommandExecutor, TabCompleter {
 
         if ("list".equals(sub)) {
             if (!(sender instanceof Player)) {
-                sender.sendMessage("Use /dns list as a player to see your localnet, or /dns list main <n> or /dns <address|name>");
+                sender.sendMessage("Use /" + label + " list as a player to see your localnet, or /" + label + " list main <n> or /" + label + " <address|name>");
                 return true;
             }
             Player p = (Player) sender;
@@ -122,14 +122,15 @@ public class DnsCommand implements CommandExecutor, TabCompleter {
             if (address.startsWith(st.getAddress() + ".") && address.substring(st.getAddress().length() + 1).matches("[0-9]+")) {
                 displayLabel = st.getName() + " terminal #" + address.substring(st.getAddress().length() + 1);
             }
+            String setDestCmd = "/netro setdestination " + address;
             plugin.sendMessage(sender, Component.text(displayLabel + " ", NamedTextColor.GREEN)
-                .append(Component.text(address).clickEvent(ClickEvent.runCommand("/setdestination " + address)))
+                .append(Component.text(address).clickEvent(ClickEvent.runCommand(setDestCmd)))
                 .append(Component.text("  " + st.getWorld() + " " + st.getSignX() + "," + st.getSignY() + "," + st.getSignZ()).color(NamedTextColor.GRAY))
-                .append(Component.text(" [Set Destination]").color(NamedTextColor.DARK_GRAY).clickEvent(ClickEvent.runCommand("/setdestination " + address))));
+                .append(Component.text(" [Set Destination]").color(NamedTextColor.DARK_GRAY).clickEvent(ClickEvent.runCommand(setDestCmd))));
             return true;
         }
 
-        sender.sendMessage("Usage: /dns list | list cluster | list main <n> | <address|name>");
+        sender.sendMessage("Usage: /" + label + " list | list cluster | list main <n> | <address|name>");
         return true;
     }
 
@@ -143,10 +144,11 @@ public class DnsCommand implements CommandExecutor, TabCompleter {
             return;
         }
         for (Station st : stations) {
+            String setDestStation = "/netro setdestination " + st.getAddress();
             Component line = Component.text("  ► " + st.getName() + "  ").color(NamedTextColor.GREEN)
                 .append(Component.text(st.getAddress()).color(NamedTextColor.WHITE))
                 .append(Component.text("  ").append(
-                    Component.text("[Any Terminal]").color(NamedTextColor.GRAY).clickEvent(ClickEvent.runCommand("/setdestination " + st.getAddress()))));
+                    Component.text("[Any Terminal]").color(NamedTextColor.GRAY).clickEvent(ClickEvent.runCommand(setDestStation))));
             plugin.sendMessage(sender, line);
             if (withTerminals) {
                 List<TransferNode> terms = nodeRepo.findTerminals(st.getId());
@@ -154,9 +156,10 @@ public class DnsCommand implements CommandExecutor, TabCompleter {
                     TransferNode tn = terms.get(i);
                     if (tn.getTerminalIndex() != null) {
                         String termAddr = st.getAddress() + "." + tn.getTerminalIndex();
+                        String setDestTerm = "/netro setdestination " + termAddr;
                         plugin.sendMessage(sender, Component.text("        └ " + tn.getName() + "  ").color(NamedTextColor.DARK_GRAY)
-                            .append(Component.text(termAddr).clickEvent(ClickEvent.runCommand("/setdestination " + termAddr)))
-                            .append(Component.text("  [Set Destination]").color(NamedTextColor.GRAY).clickEvent(ClickEvent.runCommand("/setdestination " + termAddr))));
+                            .append(Component.text(termAddr).clickEvent(ClickEvent.runCommand(setDestTerm)))
+                            .append(Component.text("  [Set Destination]").color(NamedTextColor.GRAY).clickEvent(ClickEvent.runCommand(setDestTerm))));
                     }
                 }
             }
@@ -178,7 +181,7 @@ public class DnsCommand implements CommandExecutor, TabCompleter {
             Collections.sort(out);
             return out;
         }
-        return Collections.emptyList();
+        return List.of();
     }
 
     private static boolean isFourPartAddress(String addr) {

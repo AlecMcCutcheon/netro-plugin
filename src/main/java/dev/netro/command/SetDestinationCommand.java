@@ -37,14 +37,14 @@ public class SetDestinationCommand implements CommandExecutor {
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (args.length < 1) {
-            sender.sendMessage("Usage: /setdestination <address|name|Name:TerminalIndex>  (e.g. Snowy2 or Snowy2:0; or /setdestination <dest> <player>)");
+            sender.sendMessage("Usage: /" + label + " <address|name|StationName:TerminalIndex|StationName:TerminalName>  (e.g. Snowy2, Snowy2:0, or Snowy2:Platform A; or /" + label + " <dest> <player>)");
             return true;
         }
 
         String nameOrAddress = args[0].strip();
         Optional<String> addressOpt = DestinationResolver.resolveToAddress(stationRepo, nodeRepo, nameOrAddress);
         if (addressOpt.isEmpty()) {
-            sender.sendMessage("No station or terminal found for \"" + nameOrAddress + "\". Use address (e.g. 2.4.7.3), station name (e.g. Snowy2), or Name:TerminalIndex (e.g. Snowy2:0).");
+            sender.sendMessage("No station or terminal found for \"" + nameOrAddress + "\". Use address (e.g. 2.4.7.3), station name (e.g. Snowy2), Name:TerminalIndex (e.g. Snowy2:0), or Name:TerminalName (e.g. Snowy2:Platform A).");
             return true;
         }
         String address = addressOpt.get();

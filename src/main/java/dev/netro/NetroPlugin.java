@@ -6,25 +6,13 @@ import dev.netro.command.*;
 import dev.netro.database.CartRepository;
 import dev.netro.database.Database;
 import dev.netro.database.DetectorRepository;
-import dev.netro.database.StationDetectorRepository;
 import dev.netro.database.StationRepository;
 
-import java.util.Collections;
-import dev.netro.listener.AbsorbWizardListener;
 import dev.netro.listener.CartListener;
-import dev.netro.listener.JunctionWizardListener;
 import dev.netro.listener.StationListener;
-import dev.netro.listener.SignalRegisterListener;
-import dev.netro.listener.TerminalWizardListener;
 import dev.netro.detector.DetectorControllerSignListener;
 import dev.netro.detector.DetectorRailHandler;
-import dev.netro.listener.TransferNodeBlockListener;
-import dev.netro.listener.TransferWizardListener;
 import dev.netro.routing.RoutingEngine;
-import dev.netro.signal.SignalEngine;
-import dev.netro.junction.JunctionSetupWizard;
-import dev.netro.terminal.TerminalSetupWizard;
-import dev.netro.transfer.TransferSetupWizard;
 import net.kyori.adventure.audience.Audience;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
@@ -32,7 +20,6 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -44,82 +31,43 @@ public class NetroPlugin extends JavaPlugin {
     private static NetroPlugin instance;
     private Database database;
     private RoutingEngine routingEngine;
-    private SignalEngine signalEngine;
     private NetroAPI api;
-    private final Map<UUID, TransferSetupWizard> transferWizards = new ConcurrentHashMap<>();
-    private final Map<UUID, TerminalSetupWizard> terminalWizards = new ConcurrentHashMap<>();
-    private final Map<UUID, SignalRegisterState> signalRegisterPending = new ConcurrentHashMap<>();
-    private final Map<UUID, JunctionSetupWizard> junctionWizards = new ConcurrentHashMap<>();
-    private final Set<UUID> absorbWizards = Collections.newSetFromMap(new ConcurrentHashMap<>());
-    private AbsorbCommand absorbCommand;
-    private dev.netro.listener.LinkWandListener linkWandListener;
     private DetectorRailHandler detectorRailHandler;
-    private boolean detectorDebug;
-    private boolean routingDebug;
+    private boolean debug;
     private final Map<String, ReadyHoldInfo> readyHoldCarts = new ConcurrentHashMap<>();
     /** Time (ms) when a detector/READY last applied velocity to this cart (for cruise yield / priority). */
     private final Map<String, Long> lastDetectorControlTimeByCart = new ConcurrentHashMap<>();
     private dev.netro.gui.CartControllerGuiListener cartControllerGuiListener;
     private ChunkLoadService chunkLoadService;
+    /** When non-null, next rail-controller click on a rail opens the direction UI to choose shape for this rule. */
+    private final Map<UUID, dev.netro.gui.PendingSetRailStateRule> pendingSetRailStateByPlayer = new ConcurrentHashMap<>();
 
     @Override
     public void onEnable() {
         instance = this;
         saveDefaultConfig();
-        detectorDebug = getConfig().getBoolean("detector-debug", false);
-        routingDebug = getConfig().getBoolean("routing-debug", false);
+        debug = getConfig().getBoolean("debug", false);
 
         database = new Database(this);
         database.initialize();
 
         routingEngine = new RoutingEngine(this);
-        signalEngine = new SignalEngine(this);
         api = new NetroAPI(this);
 
         detectorRailHandler = new DetectorRailHandler(this);
         getServer().getPluginManager().registerEvents(new StationListener(this), this);
         getServer().getPluginManager().registerEvents(new CartListener(this), this);
-        getServer().getPluginManager().registerEvents(new TransferWizardListener(this), this);
-        getServer().getPluginManager().registerEvents(new TerminalWizardListener(this), this);
-        getServer().getPluginManager().registerEvents(new SignalRegisterListener(this), this);
-        getServer().getPluginManager().registerEvents(new JunctionWizardListener(this), this);
-        getServer().getPluginManager().registerEvents(new TransferNodeBlockListener(this), this);
         DetectorControllerSignListener detectorSignListener = new DetectorControllerSignListener(this);
         getServer().getPluginManager().registerEvents(detectorSignListener, this);
-        absorbCommand = new AbsorbCommand(this, detectorSignListener);
-        getServer().getPluginManager().registerEvents(new AbsorbWizardListener(this), this);
-        linkWandListener = new dev.netro.listener.LinkWandListener(this);
-        getServer().getPluginManager().registerEvents(linkWandListener, this);
 
         StationCommand stationCommand = new StationCommand(this);
-        getCommand("station").setExecutor(stationCommand);
-        getCommand("station").setTabCompleter(stationCommand);
-        getCommand("setroute").setExecutor(new SetRouteCommand(this));
-        SetGatewayCommand transferCommand = new SetGatewayCommand(this);
-        getCommand("transfer").setExecutor(transferCommand);
-        getCommand("transfer").setTabCompleter(transferCommand);
-        TerminalCommand terminalCommand = new TerminalCommand(this);
-        getCommand("terminal").setExecutor(terminalCommand);
-        getCommand("terminal").setTabCompleter(terminalCommand);
-        getCommand("setdestination").setExecutor(new SetDestinationCommand(this));
+        SetDestinationCommand setDestinationCommand = new SetDestinationCommand(this);
         DnsCommand dnsCommand = new DnsCommand(this);
-        getCommand("dns").setExecutor(dnsCommand);
-        getCommand("dns").setTabCompleter(dnsCommand);
-        JunctionCommand junctionCommand = new JunctionCommand(this);
-        getCommand("junction").setExecutor(junctionCommand);
-        getCommand("junction").setTabCompleter(junctionCommand);
-        SignalCommand signalCommand = new SignalCommand(this);
-        getCommand("signal").setExecutor(signalCommand);
-        getCommand("signal").setTabCompleter(signalCommand);
-        RouteCommand routeCommand = new RouteCommand(this);
-        getCommand("route").setExecutor(routeCommand);
-        getCommand("route").setTabCompleter(routeCommand);
-        NetroCommand netroCommand = new NetroCommand(this);
+        CartControllerCommand cartControllerCommand = new CartControllerCommand(this);
+        RailroadControllerCommand railroadControllerCommand = new RailroadControllerCommand(this);
+        NetroCommand netroCommand = new NetroCommand(this, stationCommand, setDestinationCommand, dnsCommand, cartControllerCommand, railroadControllerCommand);
         getCommand("netro").setExecutor(netroCommand);
         getCommand("netro").setTabCompleter(netroCommand);
-        getCommand("absorb").setExecutor(absorbCommand);
-        getCommand("absorb").setTabCompleter(absorbCommand);
-        getCommand("clearcarts").setExecutor(new ClearCartsCommand(this));
 
         dev.netro.gui.CartControllerListener cartControllerListener = new dev.netro.gui.CartControllerListener(this);
         getServer().getPluginManager().registerEvents(cartControllerListener, this);
@@ -127,13 +75,12 @@ public class NetroPlugin extends JavaPlugin {
         this.cartControllerGuiListener = guiListener;
         getServer().getPluginManager().registerEvents(guiListener, this);
         guiListener.startRefreshTask();
-        getCommand("cartcontroller").setExecutor(new dev.netro.command.CartControllerCommand(this));
+        getServer().getPluginManager().registerEvents(new dev.netro.gui.RailroadControllerOpenListener(this), this);
 
         scheduleStaleCartCleanup();
 
         chunkLoadService = new ChunkLoadService(this,
             new StationRepository(database),
-            new StationDetectorRepository(database),
             new DetectorRepository(database),
             new CartRepository(database));
         chunkLoadService.loadAllFromDatabase();
@@ -209,28 +156,14 @@ public class NetroPlugin extends JavaPlugin {
     public static NetroPlugin getInstance() { return instance; }
     public Database getDatabase() { return database; }
     public RoutingEngine getRoutingEngine() { return routingEngine; }
-    public SignalEngine getSignalEngine() { return signalEngine; }
     public NetroAPI getAPI() { return api; }
-    public Map<UUID, TransferSetupWizard> getTransferWizards() { return transferWizards; }
-    public Map<UUID, TerminalSetupWizard> getTerminalWizards() { return terminalWizards; }
-    public Map<UUID, SignalRegisterState> getSignalRegisterPending() { return signalRegisterPending; }
-    public Map<UUID, JunctionSetupWizard> getJunctionWizards() { return junctionWizards; }
-    public Set<UUID> getAbsorbWizards() { return absorbWizards; }
-    public AbsorbCommand getAbsorbCommand() { return absorbCommand; }
-    public dev.netro.listener.LinkWandListener getLinkWandListener() { return linkWandListener; }
     public DetectorRailHandler getDetectorRailHandler() { return detectorRailHandler; }
+    public dev.netro.gui.CartControllerGuiListener getCartControllerGuiListener() { return cartControllerGuiListener; }
 
-    public boolean isDetectorDebugEnabled() { return detectorDebug; }
-    public void setDetectorDebug(boolean on) {
-        this.detectorDebug = on;
-        getConfig().set("detector-debug", on);
-        saveConfig();
-    }
-
-    public boolean isRoutingDebugEnabled() { return routingDebug; }
-    public void setRoutingDebug(boolean on) {
-        this.routingDebug = on;
-        getConfig().set("routing-debug", on);
+    public boolean isDebugEnabled() { return debug; }
+    public void setDebug(boolean on) {
+        this.debug = on;
+        getConfig().set("debug", on);
         saveConfig();
     }
 
@@ -253,13 +186,6 @@ public class NetroPlugin extends JavaPlugin {
         if (cartControllerGuiListener != null) cartControllerGuiListener.yieldCart(cartUuid);
     }
 
-    /** Call when MINV/MAXV applied velocity: updates stored cruise speed; for carts that never had GUI opened, turns Start (cruise) on so they keep this V. Does not yield (READY yields). */
-    public void notifyCartVelocityControlledByDetector(String cartUuid, double appliedSpeedMagnitude) {
-        lastDetectorControlTimeByCart.put(cartUuid, System.currentTimeMillis());
-        if (cartControllerGuiListener != null)
-            cartControllerGuiListener.updateStoredSpeedFromMagnitude(cartUuid, appliedSpeedMagnitude);
-    }
-
     /** True if detector/READY last controlled this cart within the last {@code withinTicks} ticks (~50 ms per tick). */
     public boolean isRecentlyControlledByDetector(String cartUuid, int withinTicks) {
         Long t = lastDetectorControlTimeByCart.get(cartUuid);
@@ -267,20 +193,12 @@ public class NetroPlugin extends JavaPlugin {
         return (System.currentTimeMillis() - t) < (withinTicks * 50L);
     }
 
-    public static final class SignalRegisterState {
-        public enum Step { AWAITING_LECTERN, AWAITING_CHAT }
-        public final Step step;
-        public final String stationId;
-        public final String world;
-        public final int x, y, z;
+    public dev.netro.gui.PendingSetRailStateRule getPendingSetRailState(java.util.UUID playerUuid) {
+        return pendingSetRailStateByPlayer.get(playerUuid);
+    }
 
-        public SignalRegisterState(Step step, String stationId, String world, int x, int y, int z) {
-            this.step = step;
-            this.stationId = stationId;
-            this.world = world;
-            this.x = x;
-            this.y = y;
-            this.z = z;
-        }
+    public void setPendingSetRailState(java.util.UUID playerUuid, dev.netro.gui.PendingSetRailStateRule pending) {
+        if (pending == null) pendingSetRailStateByPlayer.remove(playerUuid);
+        else pendingSetRailStateByPlayer.put(playerUuid, pending);
     }
 }

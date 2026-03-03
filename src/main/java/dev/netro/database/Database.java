@@ -51,13 +51,6 @@ public class Database {
                     st.execute(s);
                 }
             }
-
-            try (Statement st = connection.createStatement()) {
-                st.execute("ALTER TABLE station_detectors ADD COLUMN set_dest_value TEXT");
-            } catch (SQLException e) {
-                if (e.getMessage() == null || !e.getMessage().toLowerCase().contains("duplicate column"))
-                    plugin.getLogger().warning("Migration set_dest_value: " + e.getMessage());
-            }
         } catch (Exception e) {
             plugin.getLogger().severe("Database init failed: " + e.getMessage());
             throw new RuntimeException(e);

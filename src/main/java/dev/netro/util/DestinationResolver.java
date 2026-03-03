@@ -8,8 +8,8 @@ import java.util.Optional;
 
 /**
  * Resolves destination strings to full addresses for cart routing.
- * Supports: numeric address (e.g. 2.4.7.3), station name (e.g. Snowy2 → any terminal),
- * and Name:TerminalIndex (e.g. Snowy2:0 → that terminal's address).
+ * Supports: numeric address (e.g. 2.4.7.3), station name (e.g. Snowy2), Name:TerminalIndex (e.g. Snowy2:0),
+ * and Name:TerminalName (e.g. Snowy2:Platform A). Terminal indices are 0-based.
  */
 public final class DestinationResolver {
 
@@ -43,14 +43,18 @@ public final class DestinationResolver {
                 .or(() -> stationRepo.findByAddress(namePart));
             if (station.isEmpty()) return Optional.empty();
             if (indexPart.isEmpty()) return Optional.of(station.get().getAddress());
-            int terminalIndex;
             try {
-                terminalIndex = Integer.parseInt(indexPart);
-            } catch (NumberFormatException e) {
-                return Optional.empty();
+                int terminalIndex = Integer.parseInt(indexPart);
+                return nodeRepo.findTerminalByIndex(station.get().getId(), terminalIndex)
+                    .map(t -> station.get().getAddress() + "." + terminalIndex);
+            } catch (NumberFormatException ignored) {
             }
-            return nodeRepo.findTerminalByIndex(station.get().getId(), terminalIndex)
-                .map(t -> station.get().getAddress() + "." + terminalIndex);
+            Optional<dev.netro.model.TransferNode> node = nodeRepo.findByNameAtStation(station.get().getId(), indexPart);
+            if (node.isEmpty()) return Optional.empty();
+            if (node.get().isTerminal() && node.get().getTerminalIndex() != null) {
+                return Optional.of(station.get().getAddress() + "." + node.get().getTerminalIndex());
+            }
+            return Optional.of(station.get().getAddress());
         }
 
         return stationRepo.findByNameIgnoreCase(s)

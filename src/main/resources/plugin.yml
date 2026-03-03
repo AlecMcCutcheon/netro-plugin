@@ -1,33 +1,9 @@
 name: Netro
-version: 1.0.0
+version: 1.1.0
 main: dev.netro.NetroPlugin
 api-version: '1.21'
-description: Rail network plugin — stations, transfer nodes, junctions, routing, cart tracking
+description: Rail network plugin — stations, transfer nodes, routing, cart tracking
 
 commands:
   netro:
-    description: Netro main command (e.g. detectordebug)
-  station:
-    description: Create or manage stations
-  setroute:
-    description: Set routing table entries
-  transfer:
-    description: Create and manage transfer nodes (guided setup, pair, status, info, invert, test)
-  terminal:
-    description: Create terminals (transfer switch + gate slots only, no hold switches)
-  setdestination:
-    description: Set cart destination
-  dns:
-    description: DNS / address lookup
-  junction:
-    description: Create or manage junctions
-  signal:
-    description: Manage station signals and lecterns
-  route:
-    description: List or manage named display routes
-  absorb:
-    description: Re-register station/detector/controller sign. Use /absorb wand to get the Absorb Wand (click signs).
-  clearcarts:
-    description: Clear all cart state from the DB (carts, segment occupancy, held counts). Use when stuck or after carts were removed without the plugin knowing.
-  cartcontroller:
-    description: Gives you the Cart Controller item. Right-click a cart or use while in a cart to open the control menu.
+    description: Netro root — debug, guide, station, setdestination, dns, cartcontroller, railroadcontroller

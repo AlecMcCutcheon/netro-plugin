@@ -5,7 +5,7 @@ package dev.netro.model;
  * Two paired transfer nodes form a complete bidirectional rail connection.
  *
  * Physical components:
- *   - One or more transfer switches (divert cart off main line into siding)
+ *   - One or more transfer switches (switch cart off main line into siding)
  *   - Two hold switches (one near station, one near main line)
  *   - One or more gate slots (powered rails in siding, form the physical queue buffer)
  */

@@ -17,6 +17,8 @@ public class CartControllerState {
 
     private Vector cachedVelocity = new Vector(0, 0, 0);
     private int speedLevel = 5;
+    /** When set by a rule (SET_CRUISE_SPEED), use this magnitude instead of level-derived; null = use level. */
+    private Double customSpeedMagnitude = null;
     /** false = stopped/yield (we don't apply velocity; rails and detectors have control). true = cruise (we re-apply set speed). */
     private boolean cruiseActive = false;
 
@@ -36,12 +38,17 @@ public class CartControllerState {
         this.speedLevel = Math.max(MIN_LEVEL, Math.min(MAX_LEVEL, level));
     }
 
-    /** Target velocity magnitude in Minecraft's 0–1 range (0.1 at level 1, 1.0 at level 10). */
+    /** Target velocity magnitude in Minecraft's 0–1 range (0.1 at level 1, 1.0 at level 10). If custom (from rule) is set, that is used. */
     public double getTargetSpeedMagnitude() {
+        if (customSpeedMagnitude != null) return Math.max(0, Math.min(1, customSpeedMagnitude));
         return MIN_VELOCITY + (speedLevel - 1) * (MAX_VELOCITY - MIN_VELOCITY) / (MAX_LEVEL - MIN_LEVEL);
     }
 
-    /** Speed level (1–10) that best matches the given velocity magnitude (0–1 scale). Used when MINV/MAXV update stored cruise speed. */
+    public void setCustomSpeedMagnitude(Double magnitude) {
+        this.customSpeedMagnitude = magnitude;
+    }
+
+    /** Speed level (1–10) that best matches the given velocity magnitude (0–1 scale). */
     public static int speedLevelFromMagnitude(double magnitude) {
         if (magnitude <= 0) return MIN_LEVEL;
         int level = (int) Math.round(magnitude * MAX_LEVEL);

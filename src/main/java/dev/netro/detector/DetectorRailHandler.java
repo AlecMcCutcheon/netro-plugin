@@ -5,20 +5,16 @@ import dev.netro.database.CartHeldCountRepository;
 import dev.netro.database.CartRepository;
 import dev.netro.database.ControllerRepository;
 import dev.netro.database.DetectorRepository;
-import dev.netro.database.JunctionHeldCountRepository;
-import dev.netro.database.StationControllerRepository;
-import dev.netro.database.StationDetectorRepository;
-import dev.netro.database.JunctionRepository;
+import dev.netro.database.RuleRepository;
 import dev.netro.database.StationRepository;
 import dev.netro.database.TransferNodeRepository;
 import dev.netro.model.Controller;
 import dev.netro.model.Detector;
+import dev.netro.model.Rule;
 import dev.netro.model.Station;
-import dev.netro.model.StationController;
-import dev.netro.model.StationDetector;
-import dev.netro.model.Junction;
 import dev.netro.model.TransferNode;
 import dev.netro.routing.RoutingEngine;
+import dev.netro.util.AddressHelper;
 import dev.netro.util.DestinationResolver;
 import org.bukkit.World;
 import org.bukkit.entity.Minecart;
@@ -26,17 +22,15 @@ import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.Vector;
 
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * When a cart is on a detector rail: resolve direction, fire ENTRY/READY/CLEAR,
- * update held count, and set DIVERT/RELEASE controller bulbs.
+ * update held count, and set RELEASE controller bulbs.
  */
 public class DetectorRailHandler {
 
@@ -47,14 +41,11 @@ public class DetectorRailHandler {
     private final NetroPlugin plugin;
     private final DetectorRepository detectorRepo;
     private final ControllerRepository controllerRepo;
-    private final StationDetectorRepository stationDetectorRepo;
-    private final StationControllerRepository stationControllerRepo;
     private final CartHeldCountRepository heldCountRepo;
-    private final JunctionHeldCountRepository junctionHeldCountRepo;
     private final CartRepository cartRepo;
     private final TransferNodeRepository nodeRepo;
-    private final JunctionRepository junctionRepo;
     private final StationRepository stationRepo;
+    private final RuleRepository ruleRepo;
     private final RoutingEngine routing;
     private final UnifiedCartSeenFlow unifiedCartSeenFlow;
 
@@ -66,16 +57,13 @@ public class DetectorRailHandler {
         var db = plugin.getDatabase();
         this.detectorRepo = new DetectorRepository(db);
         this.controllerRepo = new ControllerRepository(db);
-        this.stationDetectorRepo = new StationDetectorRepository(db);
-        this.stationControllerRepo = new StationControllerRepository(db);
         this.heldCountRepo = new CartHeldCountRepository(db);
-        this.junctionHeldCountRepo = new JunctionHeldCountRepository(db);
         this.nodeRepo = new TransferNodeRepository(db);
-        this.junctionRepo = new JunctionRepository(db);
         this.cartRepo = new CartRepository(db);
         this.stationRepo = new StationRepository(db);
+        this.ruleRepo = new RuleRepository(db);
         this.routing = plugin.getRoutingEngine();
-        this.unifiedCartSeenFlow = new UnifiedCartSeenFlow(plugin, cartRepo, nodeRepo, junctionRepo, routing);
+        this.unifiedCartSeenFlow = new UnifiedCartSeenFlow(plugin, cartRepo, stationRepo, nodeRepo, routing);
     }
 
     /**
@@ -86,130 +74,22 @@ public class DetectorRailHandler {
     public boolean onCartOnDetectorRail(World world, int railX, int railY, int railZ, Minecart cart) {
         String worldName = world.getName();
         List<Detector> detectors = detectorRepo.findByRail(worldName, railX, railY, railZ);
-        List<StationDetector> stationDetectors = stationDetectorRepo.findByRail(worldName, railX, railY, railZ);
-        if (detectors.isEmpty() && stationDetectors.isEmpty()) return false;
+        if (detectors.isEmpty()) return false;
 
         String cartUuid = cart.getUniqueId().toString();
         org.bukkit.block.Block railBlock = world.getBlockAt(railX, railY, railZ);
         org.bukkit.block.BlockFace cartCardinal = DirectionHelper.velocityAndRailToCardinal(cart.getVelocity(), railBlock);
-        boolean debug = plugin.isDetectorDebugEnabled();
+        boolean debug = plugin.isDebugEnabled();
 
-        double speedAtDetector = cart.getVelocity().length();
-        boolean velocityControlled = applyStationVelocityClamps(cart, stationDetectors, cartCardinal)
-            || applyNodeJunctionVelocityClamps(cart, detectors, cartCardinal);
-        if (velocityControlled) plugin.notifyCartVelocityControlledByDetector(cartUuid, cart.getVelocity().length());
-        final double speedForDebug = speedAtDetector;
-
-        // Main thread: collect all minecart UUIDs that exist in the world (all worlds). Passed to async to trim ghosts from segment_occupancy before collision checks.
-        final Set<String> existingCartUuids = new HashSet<>();
-        for (World w : plugin.getServer().getWorlds()) {
-            for (org.bukkit.entity.Entity e : w.getEntities()) {
-                if (e instanceof Minecart) existingCartUuids.add(e.getUniqueId().toString());
-            }
-        }
+        final double speedForDebug = cart.getVelocity().length();
+        final java.util.Optional<String> headingTowardStationId = resolveHeadingTowardStation(detectors, cartCardinal);
 
         plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
             List<BulbAction> bulbActions = new ArrayList<>();
+            List<RailStateAction> railStateActions = new ArrayList<>();
+            List<CruiseSpeedAction> cruiseSpeedActions = new ArrayList<>();
 
-            UnifiedCartSeenFlow.Result flowResult = unifiedCartSeenFlow.run(cartUuid, world, cart, stationDetectors, detectors, existingCartUuids);
-            boolean ranNoDestAtStart = flowResult.ranNoDestAtStart();
-
-            for (StationDetector sd : stationDetectors) {
-                String dir = DirectionHelper.cardinalToDirectionLabel(sd.getSignFacing(), cartCardinal);
-                boolean setDestMatches = ("SET_DEST".equals(sd.getRule1Role()) && ruleMatches("SET_DEST", sd.getRule1Direction(), dir))
-                    || (sd.getRule2Role() != null && "SET_DEST".equals(sd.getRule2Role()) && ruleMatches("SET_DEST", sd.getRule2Direction(), dir))
-                    || (sd.getRule3Role() != null && "SET_DEST".equals(sd.getRule3Role()) && ruleMatches("SET_DEST", sd.getRule3Direction(), dir))
-                    || (sd.getRule4Role() != null && "SET_DEST".equals(sd.getRule4Role()) && ruleMatches("SET_DEST", sd.getRule4Direction(), dir));
-                if (setDestMatches && sd.getSetDestValue() != null && !sd.getSetDestValue().isEmpty()) {
-                    DestinationResolver.resolveToAddress(stationRepo, nodeRepo, sd.getSetDestValue())
-                        .ifPresent(addr -> {
-                            cartRepo.setDestination(cartUuid, addr, sd.getStationId());
-                            recheckTerminalReleaseForCart(cartUuid);
-                        });
-                }
-                boolean anyRouteMatch = false;
-                if ("ROUTE".equals(sd.getRule1Role()) && ruleMatches("ROUTE", sd.getRule1Direction(), dir)) anyRouteMatch = true;
-                if (sd.getRule2Role() != null && "ROUTE".equals(sd.getRule2Role()) && ruleMatches("ROUTE", sd.getRule2Direction(), dir)) anyRouteMatch = true;
-                if (sd.getRule3Role() != null && "ROUTE".equals(sd.getRule3Role()) && ruleMatches("ROUTE", sd.getRule3Direction(), dir)) anyRouteMatch = true;
-                if (sd.getRule4Role() != null && "ROUTE".equals(sd.getRule4Role()) && ruleMatches("ROUTE", sd.getRule4Direction(), dir)) anyRouteMatch = true;
-                String stationName = stationRepo.findById(sd.getStationId()).map(Station::getName).orElse(sd.getStationId());
-                if (debug) {
-                    plugin.getLogger().info("[Netro detector] rail " + railX + "," + railY + "," + railZ
-                        + " station=" + stationName + " dir=" + dir
-                        + " speed=" + String.format("%.3f", speedForDebug)
-                        + " ROUTE_match=" + anyRouteMatch);
-                }
-                if (!anyRouteMatch) continue;
-                Optional<String> nextHop = routing.getNextHopNodeAtStation(cartUuid, sd.getStationId());
-                Optional<Map<String, Object>> cartDataForReason = cartRepo.find(cartUuid);
-                boolean noDestination = cartDataForReason.isPresent()
-                    && (cartDataForReason.get().get("destination_address") == null || "".equals(cartDataForReason.get().get("destination_address")));
-                boolean cartNotInDb = cartDataForReason.isEmpty();
-                // Fallback: run no-dest rule here only when the unified flow did not (e.g. no station context at this rail). See UnifiedCartSeenFlow.
-                if (nextHop.isEmpty() && (noDestination || cartNotInDb) && !ranNoDestAtStart) {
-                    String worldNameForDespawn = world.getName();
-                    java.util.UUID cartUuidObj = cart.getUniqueId();
-                    nextHop = routing.applyNoDestinationRule(cartUuid, sd.getStationId(), () ->
-                        plugin.getServer().getScheduler().runTask(plugin, () -> {
-                            org.bukkit.World w = plugin.getServer().getWorld(worldNameForDespawn);
-                            if (w != null) {
-                                for (org.bukkit.entity.Entity e : w.getEntities()) {
-                                    if (e.getUniqueId().equals(cartUuidObj)) {
-                                        e.remove();
-                                        break;
-                                    }
-                                }
-                            }
-                        }));
-                }
-                if (debug) {
-                    String dest = cartDataForReason.map(d -> (String) d.get("destination_address")).orElse(null);
-                    if (nextHop.isEmpty()) {
-                        String reason = cartNotInDb ? "cart not in DB (no terminal to assign)"
-                            : noDestination ? "cart had no destination, no terminals (cart removed)"
-                                : "no route to destination";
-                        List<StationController> controllers = stationControllerRepo.findByStation(sd.getStationId());
-                        plugin.getLogger().info("[Netro detector] ROUTE station=" + stationName + " cart=" + cartUuid + " dest=" + dest + " nextHop=empty (" + reason + ") → NOT_TRANSFER on " + controllers.size() + " controller(s)");
-                    } else {
-                        String nextHopLabel = stationControllerTargetLabel(nextHop.get());
-                        List<StationController> controllers = stationControllerRepo.findByStation(sd.getStationId());
-                        plugin.getLogger().info("[Netro detector] ROUTE station=" + stationName + " cart=" + cartUuid + " dest=" + dest + " dir=" + dir + " nextHop=" + nextHopLabel + " → applying signals to " + controllers.size() + " controller(s)");
-                    }
-                }
-                List<StationController> controllers = stationControllerRepo.findByStation(sd.getStationId());
-                // Reset controllers for the chosen hop to OFF first so state cannot stay softlocked ON from a previous direction; then direction logic sets TRA/NOT_TRA.
-                if (nextHop.isPresent()) {
-                    String chosenNodeId = nextHop.get();
-                    for (StationController c : controllers) {
-                        if (c.getTargetNodeId().equals(chosenNodeId))
-                            bulbActions.add(new BulbAction(c.getWorld(), c.getX(), c.getY(), c.getZ(), false, 0));
-                    }
-                }
-                if (nextHop.isPresent()) {
-                    String nextHopId = nextHop.get(); // When dispatch is blocked, routing returns terminal so TRA/NOT_TRA still fire (TRA=chosen, NOT_TRA=others).
-                    for (StationController c : controllers) {
-                        boolean hasTransferMatch = stationControllerRuleMatches(c, dir, "TRANSFER", "TRANSFER+");
-                        boolean hasNotTransferMatch = stationControllerRuleMatches(c, dir, "NOT_TRANSFER", "NOT_TRANSFER+");
-                        // TRA on for the chosen next-hop (when rule matches dir); NOT_TRA on for all other controllers (when rule matches dir). Applied even when blocked.
-                        boolean isChosen = c.getTargetNodeId().equals(nextHopId);
-                        boolean on = (isChosen && hasTransferMatch) || (!isChosen && hasNotTransferMatch);
-                        bulbActions.add(new BulbAction(c.getWorld(), c.getX(), c.getY(), c.getZ(), on, 0));
-                        if (debug) {
-                            String targetLabel = stationControllerTargetLabel(c.getTargetNodeId());
-                            plugin.getLogger().info("[Netro detector] ROUTE controller target=" + targetLabel + " dir=" + dir + " isChosen=" + isChosen + " hasTRA=" + hasTransferMatch + " hasNOT_TRA=" + hasNotTransferMatch + " signal=" + (on ? "ON" : "OFF"));
-                        }
-                    }
-                } else {
-                    for (StationController c : controllers) {
-                        boolean hasNotTransferMatch = stationControllerRuleMatches(c, dir, "NOT_TRANSFER", "NOT_TRANSFER+");
-                        bulbActions.add(new BulbAction(c.getWorld(), c.getX(), c.getY(), c.getZ(), hasNotTransferMatch, 0));
-                        if (debug) {
-                            String targetLabel = stationControllerTargetLabel(c.getTargetNodeId());
-                            plugin.getLogger().info("[Netro detector] ROUTE controller target=" + targetLabel + " dir=" + dir + " nextHop=empty hasNOT_TRA=" + hasNotTransferMatch + " signal=" + (hasNotTransferMatch ? "ON" : "OFF"));
-                        }
-                    }
-                }
-            }
+            unifiedCartSeenFlow.run(cartUuid, world, cart, detectors, railX, railY, railZ, headingTowardStationId);
 
             for (Detector d : detectors) {
                 String dir = DirectionHelper.cardinalToDirectionLabel(d.getSignFacing(), cartCardinal);
@@ -226,23 +106,27 @@ public class DetectorRailHandler {
                 }
 
                 if (ruleMatches(d.getRule1Role(), d.getRule1Direction(), dir)) {
-                    processRule(d, d.getRule1Role(), d.getRule1Direction(), dir, cartUuid, bulbActions, debug, worldName, railX, railY, railZ);
+                    processRule(d, d.getRule1Role(), d.getRule1Direction(), dir, cartUuid, bulbActions, railStateActions, cruiseSpeedActions, debug, worldName, railX, railY, railZ);
                 }
                 if (d.getRule2Role() != null && ruleMatches(d.getRule2Role(), d.getRule2Direction(), dir)) {
-                    processRule(d, d.getRule2Role(), d.getRule2Direction(), dir, cartUuid, bulbActions, debug, worldName, railX, railY, railZ);
+                    processRule(d, d.getRule2Role(), d.getRule2Direction(), dir, cartUuid, bulbActions, railStateActions, cruiseSpeedActions, debug, worldName, railX, railY, railZ);
                 }
                 if (d.getRule3Role() != null && ruleMatches(d.getRule3Role(), d.getRule3Direction(), dir)) {
-                    processRule(d, d.getRule3Role(), d.getRule3Direction(), dir, cartUuid, bulbActions, debug, worldName, railX, railY, railZ);
+                    processRule(d, d.getRule3Role(), d.getRule3Direction(), dir, cartUuid, bulbActions, railStateActions, cruiseSpeedActions, debug, worldName, railX, railY, railZ);
                 }
                 if (d.getRule4Role() != null && ruleMatches(d.getRule4Role(), d.getRule4Direction(), dir)) {
-                    processRule(d, d.getRule4Role(), d.getRule4Direction(), dir, cartUuid, bulbActions, debug, worldName, railX, railY, railZ);
+                    processRule(d, d.getRule4Role(), d.getRule4Direction(), dir, cartUuid, bulbActions, railStateActions, cruiseSpeedActions, debug, worldName, railX, railY, railZ);
                 }
                 bulbActions.add(new BulbAction(d.getWorld(), d.getX(), d.getY(), d.getZ(), true, DETECTOR_PULSE_MS));
             }
 
             dedupeBulbActions(bulbActions);
 
+            final List<CruiseSpeedAction> cruiseSpeedActionsFinal = cruiseSpeedActions;
             plugin.getServer().getScheduler().runTask(plugin, () -> {
+                for (CruiseSpeedAction a : cruiseSpeedActionsFinal) {
+                    plugin.getCartControllerGuiListener().applyRuleCruiseSpeed(a.cartUuid, a.magnitude);
+                }
                 for (BulbAction a : bulbActions) {
                     CopperBulbHelper.setPowered(plugin.getServer().getWorld(a.world), a.x, a.y, a.z, a.on);
                     if (a.pulseMs > 0) {
@@ -250,19 +134,23 @@ public class DetectorRailHandler {
                             CopperBulbHelper.setPowered(plugin.getServer().getWorld(a.world), a.x, a.y, a.z, false), a.pulseMs / 50);
                     }
                 }
+                for (RailStateAction r : railStateActions) {
+                    org.bukkit.World w = plugin.getServer().getWorld(r.world);
+                    if (w == null) continue;
+                    org.bukkit.block.Block block = w.getBlockAt(r.x, r.y, r.z);
+                    if (block.getBlockData() instanceof org.bukkit.block.data.Rail railData) {
+                        try {
+                            railData.setShape(org.bukkit.block.data.Rail.Shape.valueOf(r.shapeName));
+                            block.setBlockData(railData);
+                        } catch (IllegalArgumentException ignored) { }
+                    }
+                }
             });
         });
         return true;
     }
 
-    /** Human-readable target for station controller debug: "StationName:NodeName". */
-    private String stationControllerTargetLabel(String nodeId) {
-        return nodeRepo.findById(nodeId)
-            .map(n -> stationRepo.findById(n.getStationId()).map(Station::getName).orElse("") + ":" + n.getName())
-            .orElse(nodeId);
-    }
-
-    /** Human-readable target for detector debug: "node=Station:Node (transfer|terminal)" or "junction=JunctionName". */
+    /** Human-readable target for detector debug: "node=Station:Node (transfer|terminal)". */
     private String detectorTargetLabel(Detector d) {
         if (d.getNodeId() != null) {
             Optional<TransferNode> node = nodeRepo.findById(d.getNodeId());
@@ -272,10 +160,6 @@ public class DetectorRailHandler {
                 return "node=" + stName + ":" + node.get().getName() + " (" + kind + ")";
             }
             return "node=" + d.getNodeId();
-        }
-        if (d.getJunctionId() != null) {
-            Optional<Junction> j = junctionRepo.findById(d.getJunctionId());
-            return "junction=" + (j.map(Junction::getName).orElse(d.getJunctionId()));
         }
         return "detector=" + d.getId();
     }
@@ -290,9 +174,9 @@ public class DetectorRailHandler {
     }
 
     /**
-     * When READY (terminal or junction) detects a cart, hold it at the center of the detector rail for 1 second.
+     * When READY (terminal) detects a cart, hold it at the center of the detector rail for 1 second.
      * We use velocity correction (not teleport): each tick we set velocity toward center until at center, then zero.
-     * Same approach as MINV/MAXV so it works with a player in the cart. VehicleMoveEvent + timer both apply the correction.
+     * Velocity-based so it works with a player in the cart. VehicleMoveEvent + timer both apply the correction.
      */
     private void scheduleTerminalReadyCartCenter(String cartUuid, String railWorldName, int railX, int railY, int railZ) {
         double cx = railX + 0.5;
@@ -337,12 +221,12 @@ public class DetectorRailHandler {
 
     /** Distance within which the cart is considered at center; then we set velocity to zero. */
     private static final double READY_CENTER_TOLERANCE = 0.15;
-    /** Max speed when correcting toward center (velocity-based, works with player in cart like MINV/MAXV). */
+    /** Max speed when correcting toward center (velocity-based, works with player in cart). */
     private static final double READY_CORRECTION_SPEED = 0.25;
 
     /**
      * Move the cart toward (cx,cy,cz) using velocity only: if not at center, set velocity toward center;
-     * once at center, set velocity to zero. Same approach as MINV/MAXV so it works with a player in the cart.
+     * once at center, set velocity to zero. Velocity-based so it works with a player in the cart.
      */
     public void applyReadyHoldVelocityCorrection(Minecart cart, double cx, double cy, double cz) {
         org.bukkit.Location loc = cart.getLocation();
@@ -358,149 +242,43 @@ public class DetectorRailHandler {
         cart.setVelocity(new Vector(dx / dist * speed, dy / dist * speed, dz / dist * speed));
     }
 
-    /**
-     * Apply MINV_ and MAXV_ rules from node/junction detectors at this rail. Same logic as station
-     * (MINV floor, then MAXV ceiling, direction-aware). Run on main thread.
-     * @return true if velocity was modified (so cruise can yield)
-     */
-    private boolean applyNodeJunctionVelocityClamps(Minecart cart, List<Detector> detectors, org.bukkit.block.BlockFace cartCardinal) {
-        if (detectors == null || detectors.isEmpty()) return false;
-        boolean changed = false;
-        double maxMinV = 0;
-        for (Detector d : detectors) {
-            String sdDir = DirectionHelper.cardinalToDirectionLabel(d.getSignFacing(), cartCardinal);
-            for (int i = 1; i <= 4; i++) {
-                String role = i == 1 ? d.getRule1Role() : i == 2 ? d.getRule2Role() : i == 3 ? d.getRule3Role() : d.getRule4Role();
-                String ruleDir = i == 1 ? d.getRule1Direction() : i == 2 ? d.getRule2Direction() : i == 3 ? d.getRule3Direction() : d.getRule4Direction();
-                if (role == null || !role.startsWith("MINV_")) continue;
-                Double minV = parseMinVValue(role);
-                if (minV == null) continue;
-                if (ruleDir != null && sdDir != null && !directionLabelsMatch(ruleDir, sdDir)) continue;
-                maxMinV = Math.max(maxMinV, minV);
-            }
-        }
-        if (maxMinV > 0) {
-            Vector v = cart.getVelocity();
-            double len = v.length();
-            if (len < maxMinV) {
-                Vector dirVec = new Vector(cartCardinal.getModX(), cartCardinal.getModY(), cartCardinal.getModZ());
-                if (dirVec.lengthSquared() > 1e-9) {
-                    cart.setVelocity(dirVec.normalize().multiply(maxMinV));
-                    changed = true;
-                }
-            }
-        }
-        double minMax = Double.POSITIVE_INFINITY;
-        for (Detector d : detectors) {
-            String sdDir = DirectionHelper.cardinalToDirectionLabel(d.getSignFacing(), cartCardinal);
-            for (int i = 1; i <= 4; i++) {
-                String role = i == 1 ? d.getRule1Role() : i == 2 ? d.getRule2Role() : i == 3 ? d.getRule3Role() : d.getRule4Role();
-                String ruleDir = i == 1 ? d.getRule1Direction() : i == 2 ? d.getRule2Direction() : i == 3 ? d.getRule3Direction() : d.getRule4Direction();
-                if (role == null || !role.startsWith("MAXV_")) continue;
-                Double maxV = parseMaxVValue(role);
-                if (maxV == null) continue;
-                if (ruleDir != null && sdDir != null && !directionLabelsMatch(ruleDir, sdDir)) continue;
-                minMax = Math.min(minMax, maxV);
-            }
-        }
-        if (minMax != Double.POSITIVE_INFINITY) {
-            Vector vMax = cart.getVelocity();
-            double lenMax = vMax.length();
-            if (lenMax > minMax && lenMax > 1e-9) {
-                cart.setVelocity(vMax.normalize().multiply(minMax));
-                changed = true;
-            }
-        }
-        return changed;
-    }
-
-    /**
-     * Apply MINV_ and MAXV_ rules from station detectors at this rail. MINV clamps velocity up (floor)
-     * in the matching direction; MAXV clamps down (ceiling). Applied in that order. Run on main thread.
-     * @return true if velocity was modified (so cruise can yield)
-     */
-    private boolean applyStationVelocityClamps(Minecart cart, List<StationDetector> stationDetectors, org.bukkit.block.BlockFace cartCardinal) {
-        boolean changed = false;
-        double maxMinV = 0;
-        for (StationDetector sd : stationDetectors) {
-            String sdDir = DirectionHelper.cardinalToDirectionLabel(sd.getSignFacing(), cartCardinal);
-            for (int i = 1; i <= 4; i++) {
-                String role = i == 1 ? sd.getRule1Role() : i == 2 ? sd.getRule2Role() : i == 3 ? sd.getRule3Role() : sd.getRule4Role();
-                String ruleDir = i == 1 ? sd.getRule1Direction() : i == 2 ? sd.getRule2Direction() : i == 3 ? sd.getRule3Direction() : sd.getRule4Direction();
-                if (role == null || !role.startsWith("MINV_")) continue;
-                Double minV = parseMinVValue(role);
-                if (minV == null) continue;
-                if (ruleDir != null && sdDir != null && !directionLabelsMatch(ruleDir, sdDir)) continue;
-                maxMinV = Math.max(maxMinV, minV);
-            }
-        }
-        if (maxMinV > 0) {
-            Vector v = cart.getVelocity();
-            double len = v.length();
-            if (len < maxMinV) {
-                Vector dirVec = new Vector(cartCardinal.getModX(), cartCardinal.getModY(), cartCardinal.getModZ());
-                if (dirVec.lengthSquared() > 1e-9) {
-                    cart.setVelocity(dirVec.normalize().multiply(maxMinV));
-                    changed = true;
-                }
-            }
-        }
-
-        double minMax = Double.POSITIVE_INFINITY;
-        for (StationDetector sd : stationDetectors) {
-            String sdDir = DirectionHelper.cardinalToDirectionLabel(sd.getSignFacing(), cartCardinal);
-            for (int i = 1; i <= 4; i++) {
-                String role = i == 1 ? sd.getRule1Role() : i == 2 ? sd.getRule2Role() : i == 3 ? sd.getRule3Role() : sd.getRule4Role();
-                String ruleDir = i == 1 ? sd.getRule1Direction() : i == 2 ? sd.getRule2Direction() : i == 3 ? sd.getRule3Direction() : sd.getRule4Direction();
-                if (role == null || !role.startsWith("MAXV_")) continue;
-                Double maxV = parseMaxVValue(role);
-                if (maxV == null) continue;
-                if (ruleDir != null && sdDir != null && !directionLabelsMatch(ruleDir, sdDir)) continue;
-                minMax = Math.min(minMax, maxV);
-            }
-        }
-        if (minMax != Double.POSITIVE_INFINITY) {
-            Vector vMax = cart.getVelocity();
-            double lenMax = vMax.length();
-            if (lenMax > minMax && lenMax > 1e-9) {
-                cart.setVelocity(vMax.normalize().multiply(minMax));
-                changed = true;
-            }
-        }
-        return changed;
-    }
-
-    /** Parse MAXV_<number> to Double; null if invalid or out of range. */
-    private static Double parseMaxVValue(String role) {
-        if (role == null || !role.startsWith("MAXV_") || role.length() <= 5) return null;
-        try {
-            double v = Double.parseDouble(role.substring(5).trim());
-            return v >= 0 && v <= 10 ? v : null;
-        } catch (NumberFormatException e) {
-            return null;
-        }
-    }
-
-    /** Parse MINV_<number> to Double; null if invalid or out of range. */
-    private static Double parseMinVValue(String role) {
-        if (role == null || !role.startsWith("MINV_") || role.length() <= 5) return null;
-        try {
-            double v = Double.parseDouble(role.substring(5).trim());
-            return v >= 0 && v <= 10 ? v : null;
-        } catch (NumberFormatException e) {
-            return null;
-        }
-    }
-
-    /** Direction on READY/CLEAR is the queue label (LEFT/RIGHT/either), not cart direction — so we don't require ruleDir == cartDir. */
+    /** ENTRY and CLEAR use cart direction when rule specifies one; READY ignores direction (single slot at terminal). */
     private static boolean ruleMatches(String role, String ruleDir, String cartDir) {
         if (role == null) return false;
-        if ("READY".equals(role) || "CLEAR".equals(role)) return true;
+        if ("READY".equals(role)) return true;
+        if ("CLEAR".equals(role)) {
+            if (ruleDir == null || ruleDir.isEmpty()) return true;
+            return directionLabelsMatch(ruleDir, cartDir);
+        }
         if (ruleDir == null) return true;
-        return ruleDir.equals(cartDir);
+        return directionLabelsMatch(ruleDir, cartDir);
     }
 
-    private void processRule(Detector d, String role, String direction, String cartDir, String cartUuid, List<BulbAction> bulbActions, boolean debug,
+    /**
+     * When the cart is seen at a transfer node and CLEAR matches, the cart is leaving that node and heading toward
+     * the paired node's station. Returns that station id so the unified flow can set destination to a terminal there.
+     */
+    private Optional<String> resolveHeadingTowardStation(List<Detector> detectors, org.bukkit.block.BlockFace cartCardinal) {
+        for (Detector d : detectors) {
+            if (d.getNodeId() == null) continue;
+            Optional<TransferNode> nodeOpt = nodeRepo.findById(d.getNodeId());
+            if (nodeOpt.isEmpty() || nodeOpt.get().isTerminal()) continue;
+            TransferNode node = nodeOpt.get();
+            if (node.getPairedNodeId() == null) continue;
+            String dir = DirectionHelper.cardinalToDirectionLabel(d.getSignFacing(), cartCardinal);
+            boolean clearFires = ("CLEAR".equals(d.getRule1Role()) && ruleMatches(d.getRule1Role(), d.getRule1Direction(), dir))
+                || (d.getRule2Role() != null && "CLEAR".equals(d.getRule2Role()) && ruleMatches(d.getRule2Role(), d.getRule2Direction(), dir))
+                || (d.getRule3Role() != null && "CLEAR".equals(d.getRule3Role()) && ruleMatches(d.getRule3Role(), d.getRule3Direction(), dir))
+                || (d.getRule4Role() != null && "CLEAR".equals(d.getRule4Role()) && ruleMatches(d.getRule4Role(), d.getRule4Direction(), dir));
+            if (clearFires) {
+                Optional<TransferNode> paired = nodeRepo.findById(node.getPairedNodeId());
+                if (paired.isPresent()) return Optional.of(paired.get().getStationId());
+            }
+        }
+        return Optional.empty();
+    }
+
+    private void processRule(Detector d, String role, String direction, String cartDir, String cartUuid, List<BulbAction> bulbActions, List<RailStateAction> railStateActions, List<CruiseSpeedAction> cruiseSpeedActions, boolean debug,
             String railWorldName, int railX, int railY, int railZ) {
         String debounceKey = cartUuid + "|" + d.getId() + "|" + role;
         long now = System.currentTimeMillis();
@@ -509,59 +287,26 @@ public class DetectorRailHandler {
         lastFired.put(debounceKey, now);
 
         String nodeId = d.getNodeId();
-        String junctionId = d.getJunctionId();
-        if (nodeId == null && junctionId == null) return;
+        if (nodeId == null) return;
 
-        // ENTRY at a node: segment boundary only (take off segment). Transfer nodes have no siding — always pass through (NOT_DIVERT). Applied regardless of dispatch block.
-        if ("ENTRY".equals(role) && nodeId != null) {
-            Optional<TransferNode> nodeOpt = nodeRepo.findById(nodeId);
-            String pairedId = nodeOpt.map(TransferNode::getPairedNodeId).orElse(null);
-            if (pairedId != null) cartRepo.removeSegmentOccupancyForCart(pairedId, nodeId, cartUuid);
-            setNodeControllers(bulbActions, nodeId, "DIVERT", cartDir, false);
-            setNodeControllers(bulbActions, nodeId, "DIVERT+", cartDir, false);
-            setNodeControllers(bulbActions, nodeId, "NOT_DIVERT", cartDir, true);
-            setNodeControllers(bulbActions, nodeId, "NOT_DIVERT+", cartDir, true);
-            if (debug) plugin.getLogger().info("[Netro detector] ENTRY node=" + nodeId + " dir=" + cartDir + " (segment only, pass through)");
-            return;
-        }
-        // ENTRY at a junction: cart leaves segment; decide divert vs NOT_DIVERT (way ahead clear?). NOT_DIVERT/DIVERT applied regardless of dispatch block elsewhere.
-        if ("ENTRY".equals(role) && junctionId != null) {
-            junctionRepo.findById(junctionId).ifPresent(j -> cartRepo.removeSegmentOccupancyForCart(j.getNodeAId(), j.getNodeBId(), cartUuid));
-            String fromSide = normalizeQueueDirection(direction);
-            boolean divert = routing.shouldDivertJunction(cartUuid, junctionId, fromSide);
-            if (debug) plugin.getLogger().info("[Netro detector] ENTRY junction=" + junctionId + " fromSide=" + fromSide + " shouldDivert=" + divert + " → DIVERT=" + divert + " NOT_DIVERT=" + !divert);
-            if (divert) {
-                setJunctionControllers(bulbActions, junctionId, "DIVERT", cartDir, true);
-                setJunctionControllers(bulbActions, junctionId, "DIVERT+", cartDir, true);
-                setJunctionControllers(bulbActions, junctionId, "NOT_DIVERT", cartDir, false);
-                setJunctionControllers(bulbActions, junctionId, "NOT_DIVERT+", cartDir, false);
-            } else {
-                setJunctionControllers(bulbActions, junctionId, "DIVERT", cartDir, false);
-                setJunctionControllers(bulbActions, junctionId, "DIVERT+", cartDir, false);
-                setJunctionControllers(bulbActions, junctionId, "NOT_DIVERT", cartDir, true);
-                setJunctionControllers(bulbActions, junctionId, "NOT_DIVERT+", cartDir, true);
+        if ("ENTRY".equals(role) || "READY".equals(role) || "CLEAR".equals(role)) {
+            String substitutedDest = applyBlockedRulesIfNeeded(d, cartUuid, cartDir);
+            if ("ENTRY".equals(role) || "CLEAR".equals(role)) {
+                evaluateRuleEngine(d, role, cartUuid, bulbActions, railStateActions, cruiseSpeedActions, railWorldName, cartDir, substitutedDest);
             }
+        }
+
+        // ENTRY at a node: no segment occupancy (no collision detection).
+        if ("ENTRY".equals(role) && nodeId != null) {
+            if (debug) plugin.getLogger().info("[Netro detector] ENTRY node=" + nodeId + " dir=" + cartDir);
             return;
         }
 
         if ("READY".equals(role) && nodeId != null) {
             boolean isTerminal = nodeRepo.findById(nodeId).map(TransferNode::isTerminal).orElse(false);
             if (!isTerminal) return;
-            String queueDir = normalizeQueueDirection(direction);
-            int slotIndex;
-            String zone;
-            if ("LEFT".equals(queueDir)) {
-                int newCount = heldCountRepo.incrementLeft(nodeId);
-                slotIndex = newCount - 1;
-                zone = "node:" + nodeId + ":LEFT";
-            } else if ("RIGHT".equals(queueDir)) {
-                int newCount = heldCountRepo.incrementRight(nodeId);
-                slotIndex = newCount - 1;
-                zone = "node:" + nodeId + ":RIGHT";
-            } else {
-                slotIndex = heldCountRepo.increment(nodeId) - 1;
-                zone = "node:" + nodeId;
-            }
+            String zone = "node:" + nodeId;
+            int slotIndex = heldCountRepo.increment(nodeId) - 1;
             cartRepo.setHeld(cartUuid, zone, slotIndex);
             Optional<TransferNode> nodeOpt = nodeRepo.findById(nodeId);
             TransferNode node = nodeOpt.orElse(null);
@@ -574,41 +319,14 @@ public class DetectorRailHandler {
                 cartRepo.clearDestination(cartUuid);
             }
             boolean releaseReversed = node != null && node.isReleaseReversed();
-            List<String> heldInQueue = cartRepo.findHeldCartsAtNode(nodeId, queueDir);
+            List<String> heldInQueue = cartRepo.findHeldCartsAtNode(nodeId, "");
             String firstToRelease = firstCartToRelease(heldInQueue, releaseReversed);
             boolean first = firstToRelease != null && firstToRelease.equals(cartUuid);
             boolean releaseOn = first && cartDest != null && !cartDest.isEmpty()
                 && !destIsForThisTerminal(cartDest, terminalAddr)
                 && (pairedId == null || routing.canDispatch(cartUuid, nodeId, pairedId).canGo());
-            if (releaseOn) setNodeControllers(bulbActions, nodeId, "RELEASE", queueDir, true);
-            if (debug) plugin.getLogger().info("[Netro detector] READY terminal node=" + nodeId + " queue=" + queueDir + " slot=" + slotIndex + " RELEASE=" + releaseOn);
-            scheduleTerminalReadyCartCenter(cartUuid, railWorldName, railX, railY, railZ);
-            return;
-        }
-        if ("READY".equals(role) && junctionId != null) {
-            String queueDir = normalizeQueueDirection(direction);
-            int slotIndex;
-            String zone;
-            if ("LEFT".equals(queueDir)) {
-                int newCount = junctionHeldCountRepo.incrementLeft(junctionId);
-                slotIndex = newCount - 1;
-                zone = "junction:" + junctionId + ":LEFT";
-            } else if ("RIGHT".equals(queueDir)) {
-                int newCount = junctionHeldCountRepo.incrementRight(junctionId);
-                slotIndex = newCount - 1;
-                zone = "junction:" + junctionId + ":RIGHT";
-            } else {
-                slotIndex = junctionHeldCountRepo.increment(junctionId) - 1;
-                zone = "junction:" + junctionId;
-            }
-            cartRepo.setHeld(cartUuid, zone, slotIndex);
-            boolean releaseReversed = junctionRepo.findById(junctionId).map(Junction::isReleaseReversed).orElse(false);
-            List<String> heldInQueue = cartRepo.findHeldCartsAtJunction(junctionId, queueDir);
-            String firstToRelease = firstCartToRelease(heldInQueue, releaseReversed);
-            boolean first = firstToRelease != null && firstToRelease.equals(cartUuid);
-            boolean releaseOn = first && routing.canReleaseFromJunction(cartUuid, junctionId);
-            if (releaseOn) setJunctionControllers(bulbActions, junctionId, "RELEASE", queueDir, true);
-            if (debug) plugin.getLogger().info("[Netro detector] READY junction=" + junctionId + " queue=" + queueDir + " slot=" + slotIndex + " RELEASE=" + releaseOn);
+            if (releaseOn) setNodeControllers(bulbActions, nodeId, "RELEASE", null, true);
+            if (debug) plugin.getLogger().info("[Netro detector] READY terminal node=" + nodeId + " slot=" + slotIndex + " RELEASE=" + releaseOn);
             scheduleTerminalReadyCartCenter(cartUuid, railWorldName, railX, railY, railZ);
             return;
         }
@@ -618,69 +336,239 @@ public class DetectorRailHandler {
             String pairedId = nodeOpt.map(TransferNode::getPairedNodeId).orElse(null);
             boolean isTerminal = nodeOpt.map(TransferNode::isTerminal).orElse(false);
             if (isTerminal) {
-                String queueDir = normalizeQueueDirection(direction);
-                if ("LEFT".equals(queueDir)) heldCountRepo.decrementLeft(nodeId);
-                else if ("RIGHT".equals(queueDir)) heldCountRepo.decrementRight(nodeId);
-                else heldCountRepo.decrement(nodeId);
+                heldCountRepo.decrement(nodeId);
                 cartRepo.clearHeld(cartUuid);
             }
-            if (pairedId != null) {
-                cartRepo.upsertSegmentOccupancy(nodeId, pairedId, cartUuid, "A_TO_B", "node:" + nodeId);
-            }
+            // No segment occupancy (no collision detection).
             clearPlusControllersNode(bulbActions, nodeId);
             turnOffAllReleaseNode(bulbActions, nodeId);
-            nodeOpt.map(TransferNode::getStationId).ifPresent(stationId ->
-                clearStationTransferOnEntry(bulbActions, stationId, nodeId, direction));
             if (isTerminal) {
                 boolean releaseReversed = nodeOpt.map(TransferNode::isReleaseReversed).orElse(false);
                 String terminalAddr = nodeOpt.flatMap(n -> stationRepo.findById(n.getStationId()).map(s -> n.terminalAddress(s.getAddress()))).orElse(null);
-                for (String evalDir : new String[] { "LEFT", "RIGHT", "" }) {
-                    List<String> stillInQueue = cartRepo.findHeldCartsAtNode(nodeId, evalDir.isEmpty() ? "" : evalDir);
-                    String nextToRelease = firstCartToRelease(stillInQueue, releaseReversed);
-                    if (nextToRelease == null) continue;
+                List<String> stillInQueue = cartRepo.findHeldCartsAtNode(nodeId, "");
+                String nextToRelease = firstCartToRelease(stillInQueue, releaseReversed);
+                if (nextToRelease != null) {
                     String nextDest = cartRepo.find(nextToRelease).map(cartData -> (String) cartData.get("destination_address")).orElse(null);
-                    if (nextDest == null || nextDest.isEmpty() || destIsForThisTerminal(nextDest, terminalAddr)) continue;
-                    if (pairedId == null || routing.canDispatch(nextToRelease, nodeId, pairedId).canGo()) {
-                        setNodeControllers(bulbActions, nodeId, "RELEASE", evalDir.isEmpty() ? null : evalDir, true);
+                    if (nextDest != null && !nextDest.isEmpty() && !destIsForThisTerminal(nextDest, terminalAddr)
+                        && (pairedId == null || routing.canDispatch(nextToRelease, nodeId, pairedId).canGo())) {
+                        setNodeControllers(bulbActions, nodeId, "RELEASE", null, true);
                     }
                 }
             }
-            if (debug) plugin.getLogger().info("[Netro detector] CLEAR node=" + nodeId + " (segment register" + (isTerminal ? ", terminal queue" : "") + ")");
-            return;
-        }
-        if ("CLEAR".equals(role) && junctionId != null) {
-            String queueDir = normalizeQueueDirection(direction);
-            if ("LEFT".equals(queueDir)) junctionHeldCountRepo.decrementLeft(junctionId);
-            else if ("RIGHT".equals(queueDir)) junctionHeldCountRepo.decrementRight(junctionId);
-            else junctionHeldCountRepo.decrement(junctionId);
-            cartRepo.clearHeld(cartUuid);
-            junctionRepo.findById(junctionId).ifPresent(j -> {
-                String nodeA = j.getNodeAId(), nodeB = j.getNodeBId();
-                String segDir = "LEFT".equals(queueDir) ? "B_TO_A" : "A_TO_B";
-                cartRepo.upsertSegmentOccupancy(nodeA, nodeB, cartUuid, segDir, "junction:" + junctionId);
-            });
-            clearPlusControllersJunction(bulbActions, junctionId);
-            turnOffAllReleaseJunction(bulbActions, junctionId);
-            boolean releaseReversed = junctionRepo.findById(junctionId).map(Junction::isReleaseReversed).orElse(false);
-            boolean anyRelease = false;
-            for (String evalDir : new String[] { "LEFT", "RIGHT", "" }) {
-                List<String> stillInQueue = cartRepo.findHeldCartsAtJunction(junctionId, evalDir.isEmpty() ? null : evalDir);
-                String nextToRelease = firstCartToRelease(stillInQueue, releaseReversed);
-                if (nextToRelease != null && routing.canReleaseFromJunction(nextToRelease, junctionId)) {
-                    setJunctionControllers(bulbActions, junctionId, "RELEASE", evalDir.isEmpty() ? null : evalDir, true);
-                    anyRelease = true;
-                }
-            }
-            if (debug) plugin.getLogger().info("[Netro detector] CLEAR junction=" + junctionId + " queue=" + queueDir + " RELEASE(next)=" + anyRelease);
+            if (debug) plugin.getLogger().info("[Netro detector] CLEAR node=" + nodeId + " (segment register" + (isTerminal ? ", terminal slot" : "") + ")");
         }
     }
 
-    /** Rule direction as queue label: "LEFT"/"RIGHT" or null for either. */
-    private static String normalizeQueueDirection(String direction) {
-        if (direction == null) return null;
-        if ("LEFT".equalsIgnoreCase(direction) || "L".equalsIgnoreCase(direction)) return "LEFT";
-        if ("RIGHT".equalsIgnoreCase(direction) || "R".equalsIgnoreCase(direction)) return "RIGHT";
-        return null;
+    /**
+     * If the cart's next hop is blocked (e.g. terminal full), returns a substituted destination to pass to normal rules.
+     * Does not change the cart's stored destination; the substitute is used only for this rule evaluation so the cart is "temporarily rerouted".
+     * If a BLOCKED rule exists for this hop, returns its action_data; else applies default policy: available terminal at current station,
+     * else at another station, else another transfer node at current station that isn't occupied. Returns null when not blocked or no substitute.
+     */
+    private String applyBlockedRulesIfNeeded(Detector d, String cartUuid, String cartDir) {
+        String nodeId = d.getNodeId();
+        if (nodeId == null) return null;
+        String cartDest = cartRepo.find(cartUuid).map(c -> (String) c.get("destination_address")).orElse(null);
+        if (cartDest == null || cartDest.isEmpty()) return null;
+
+        Optional<TransferNode> nodeOpt = nodeRepo.findById(nodeId);
+        String fromStationId = nodeOpt.map(TransferNode::getStationId).orElse(null);
+        if (fromStationId == null) return null;
+        Optional<String> nextHopNodeIdOpt = routing.resolveNextHopNode(fromStationId, cartDest);
+        if (nextHopNodeIdOpt.isEmpty()) return null;
+        String nextHopNodeId = nextHopNodeIdOpt.get();
+        String fromNodeId = nodeId;
+        if (routing.canDispatch(cartUuid, fromNodeId, nextHopNodeId).canGo()) return null;
+
+        String contextType = nodeRepo.findById(nodeId).map(TransferNode::isTerminal).orElse(false) ? Rule.CONTEXT_TERMINAL : Rule.CONTEXT_TRANSFER;
+        String contextId = nodeId;
+        String contextSide = null;
+        String destForRules = nodeIdToDestinationId(nextHopNodeId).orElse(cartDest);
+
+        List<Rule> rules = ruleRepo.findByContext(contextType, contextId, contextSide);
+        for (Rule rule : rules) {
+            if (!Rule.TRIGGER_BLOCKED.equals(rule.getTriggerType())) continue;
+            if (!Rule.ACTION_SET_DESTINATION.equals(rule.getActionType()) || rule.getActionData() == null || rule.getActionData().isEmpty()) continue;
+            if (!destinationMatchesForRule(destForRules, rule.getDestinationId())) continue;
+            if (plugin.isDebugEnabled()) {
+                plugin.getLogger().info("[Netro rule] BLOCKED hop=" + destForRules + " → substitute to " + rule.getActionData());
+            }
+            return rule.getActionData();
+        }
+
+        String defaultSubstitute = defaultBlockedSubstitute(fromStationId, fromNodeId, nextHopNodeId, cartUuid);
+        if (defaultSubstitute != null && plugin.isDebugEnabled()) {
+            plugin.getLogger().info("[Netro rule] BLOCKED hop=" + destForRules + " (no rule) → default substitute to " + defaultSubstitute);
+        }
+        return defaultSubstitute;
+    }
+
+    /** Default policy when hop is blocked and no BLOCKED rule: available terminal at current station, else at another station, else another unoccupied transfer node. */
+    private String defaultBlockedSubstitute(String currentStationId, String fromNodeId, String blockedNextHopNodeId, String cartUuid) {
+        Optional<TransferNode> termAtCurrent = nodeRepo.findAvailableTerminal(currentStationId);
+        if (termAtCurrent.isPresent()) {
+            return nodeIdToDestinationId(termAtCurrent.get().getId()).orElse(null);
+        }
+        Optional<Station> otherStation = stationRepo.findAll().stream()
+            .filter(s -> !s.getId().equals(currentStationId))
+            .filter(s -> nodeRepo.findAvailableTerminal(s.getId()).isPresent())
+            .findFirst();
+        if (otherStation.isPresent()) {
+            Optional<TransferNode> term = nodeRepo.findAvailableTerminal(otherStation.get().getId());
+            if (term.isPresent()) {
+                return nodeIdToDestinationId(term.get().getId()).orElse(null);
+            }
+        }
+        return nodeRepo.findByStation(currentStationId).stream()
+            .filter(n -> !n.getId().equals(blockedNextHopNodeId))
+            .filter(n -> routing.canDispatch(cartUuid, fromNodeId, n.getId()).canGo())
+            .findFirst()
+            .flatMap(n -> nodeIdToDestinationId(n.getId()))
+            .orElse(null);
+    }
+
+    /**
+     * Evaluate rule-based actions for this context: load rules for the detector's context (node),
+     * match trigger (ENTERING for ENTRY, CLEARING for CLEAR) and destination condition, then apply
+     * SEND_ON/SEND_OFF to controllers or SET_RAIL_STATE to the target rail.
+     */
+    private void evaluateRuleEngine(Detector d, String role, String cartUuid, List<BulbAction> bulbActions, List<RailStateAction> railStateActions, List<CruiseSpeedAction> cruiseSpeedActions, String railWorldName, String cartDir, String substitutedDestForRules) {
+        String nodeId = d.getNodeId();
+        if (nodeId == null) return;
+        Optional<TransferNode> nodeOpt = nodeRepo.findById(nodeId);
+        String contextType = nodeOpt.map(TransferNode::isTerminal).orElse(false) ? Rule.CONTEXT_TERMINAL : Rule.CONTEXT_TRANSFER;
+        String contextId = nodeId;
+        String contextSide = null;
+        String fromStationId = nodeOpt.map(TransferNode::getStationId).orElse(null);
+        String roleTriggerType = "CLEAR".equals(role) ? Rule.TRIGGER_CLEARING : Rule.TRIGGER_ENTERING;
+        String destForRules;
+        if (substitutedDestForRules != null && !substitutedDestForRules.isEmpty()) {
+            destForRules = substitutedDestForRules;
+        } else {
+            String cartDest = cartRepo.find(cartUuid)
+                .map(c -> (String) c.get("destination_address"))
+                .orElse(null);
+            destForRules = cartDest;
+            if (cartDest != null && !cartDest.isEmpty() && fromStationId != null) {
+                Optional<String> nextHopNodeId = routing.resolveNextHopNode(fromStationId, cartDest);
+                destForRules = nextHopNodeId.flatMap(this::nodeIdToDestinationId).orElse(cartDest);
+            }
+        }
+        String cartDestForLog = cartRepo.find(cartUuid).map(c -> (String) c.get("destination_address")).orElse(null);
+        List<Rule> rules = ruleRepo.findByContext(contextType, contextId, contextSide);
+        plugin.getLogger().info("[Netro rule] context=" + contextType + ":" + contextId + " trigger=" + roleTriggerType
+            + " cartDest=" + (cartDestForLog != null ? cartDestForLog : "null") + " localDest=" + (destForRules != null ? destForRules : "null")
+            + " rules=" + rules.size());
+        for (Rule rule : rules) {
+            String triggerType = rule.getTriggerType();
+            boolean forRole = roleTriggerType.equals(triggerType);
+            boolean forDetected = Rule.TRIGGER_DETECTED.equals(triggerType);
+            if (!forRole && !forDetected) continue;
+            boolean cartMatchesDest = destinationMatchesForRule(destForRules, rule.getDestinationId());
+            boolean fires = rule.isDestinationPositive() ? cartMatchesDest : !cartMatchesDest;
+            plugin.getLogger().info("[Netro rule] rule#" + rule.getRuleIndex() + " destId=" + (rule.getDestinationId() != null ? rule.getDestinationId() : "any")
+                + " positive=" + rule.isDestinationPositive() + " match=" + cartMatchesDest + " fires=" + fires + " action=" + rule.getActionType());
+            if (!fires) continue;
+            if (Rule.ACTION_SET_CRUISE_SPEED.equals(rule.getActionType()) && rule.getActionData() != null && !rule.getActionData().isEmpty()) {
+                try {
+                    double speedVal = Double.parseDouble(rule.getActionData().trim());
+                    double magnitude = Math.max(0, Math.min(1, speedVal / 10.0));
+                    cruiseSpeedActions.add(new CruiseSpeedAction(cartUuid, magnitude));
+                } catch (NumberFormatException ignored) { }
+            } else if (Rule.ACTION_SEND_ON.equals(rule.getActionType()) || Rule.ACTION_SEND_OFF.equals(rule.getActionType())) {
+                boolean on = Rule.ACTION_SEND_ON.equals(rule.getActionType());
+                String ruleRole = "RULE:" + rule.getRuleIndex();
+                for (Controller c : controllerRepo.findByNodeAndRule(d.getNodeId(), ruleRole, null)) {
+                    bulbActions.add(new BulbAction(c.getWorld(), c.getX(), c.getY(), c.getZ(), on, 0));
+                }
+            } else if (Rule.ACTION_SET_RAIL_STATE.equals(rule.getActionType()) && rule.getActionData() != null && !rule.getActionData().isEmpty()) {
+                String actionData = rule.getActionData();
+                String world;
+                int rx, ry, rz;
+                String shapeName;
+                String[] parts = actionData.split(",", -1);
+                if (parts.length == 5) {
+                    try {
+                        world = parts[0];
+                        rx = Integer.parseInt(parts[1]);
+                        ry = Integer.parseInt(parts[2]);
+                        rz = Integer.parseInt(parts[3]);
+                        shapeName = parts[4];
+                    } catch (NumberFormatException e) {
+                        world = d.getWorld();
+                        rx = d.getRailX();
+                        ry = d.getRailY();
+                        rz = d.getRailZ();
+                        shapeName = actionData;
+                    }
+                } else {
+                    world = d.getWorld();
+                    rx = d.getRailX();
+                    ry = d.getRailY();
+                    rz = d.getRailZ();
+                    shapeName = actionData;
+                }
+                railStateActions.add(new RailStateAction(world, rx, ry, rz, shapeName));
+            }
+        }
+    }
+
+    /** Converts a node ID to the same destination-id format used by the rule picker (Station:Node or address.terminalIndex). */
+    private Optional<String> nodeIdToDestinationId(String nodeId) {
+        Optional<TransferNode> nodeOpt = nodeRepo.findById(nodeId);
+        if (nodeOpt.isEmpty()) return Optional.empty();
+        TransferNode node = nodeOpt.get();
+        Optional<Station> stationOpt = stationRepo.findById(node.getStationId());
+        if (stationOpt.isEmpty()) return Optional.empty();
+        Station station = stationOpt.get();
+        if (node.isTerminal() && node.getTerminalIndex() != null) {
+            return Optional.of(station.getAddress() + "." + node.getTerminalIndex());
+        }
+        return Optional.of(station.getName() + ":" + node.getName());
+    }
+
+    /** Resolves a destination string to a node ID when it refers to a specific node (Station:Node or address.terminalIndex). */
+    private Optional<String> resolveDestinationToNodeId(String dest) {
+        if (dest == null || dest.isBlank()) return Optional.empty();
+        String s = dest.strip();
+        if (s.matches("[0-9.]+")) {
+            return AddressHelper.parseDestination(s)
+                .filter(p -> p.terminalIndex() != null)
+                .flatMap(p -> stationRepo.findByAddress(p.stationAddress())
+                    .flatMap(st -> nodeRepo.findTerminalByIndex(st.getId(), p.terminalIndex()))
+                    .map(TransferNode::getId));
+        }
+        int colon = s.indexOf(':');
+        if (colon >= 0) {
+            String namePart = s.substring(0, colon).strip();
+            String indexPart = s.substring(colon + 1).strip();
+            Optional<Station> station = stationRepo.findByNameIgnoreCase(namePart)
+                .or(() -> stationRepo.findByAddress(namePart));
+            if (station.isEmpty()) return Optional.empty();
+            if (indexPart.isEmpty()) return Optional.empty();
+            try {
+                int terminalIndex = Integer.parseInt(indexPart);
+                return nodeRepo.findTerminalByIndex(station.get().getId(), terminalIndex).map(TransferNode::getId);
+            } catch (NumberFormatException ignored) {
+            }
+            return nodeRepo.findByNameAtStation(station.get().getId(), indexPart).map(TransferNode::getId);
+        }
+        return Optional.empty();
+    }
+
+    /** True if cart destination matches the rule's destination_id. Uses node ID when both refer to specific nodes so different nodes at the same station do not match. */
+    private boolean destinationMatchesForRule(String cartDest, String ruleDestinationId) {
+        if (ruleDestinationId == null || ruleDestinationId.isEmpty()) return true;
+        if (cartDest == null || cartDest.isEmpty()) return false;
+        if (ruleDestinationId.equals(cartDest)) return true;
+        Optional<String> cartNodeId = resolveDestinationToNodeId(cartDest);
+        Optional<String> ruleNodeId = resolveDestinationToNodeId(ruleDestinationId);
+        if (cartNodeId.isPresent() && ruleNodeId.isPresent()) {
+            return cartNodeId.get().equals(ruleNodeId.get());
+        }
+        Optional<String> cartResolved = DestinationResolver.resolveToAddress(stationRepo, nodeRepo, cartDest);
+        Optional<String> ruleResolved = DestinationResolver.resolveToAddress(stationRepo, nodeRepo, ruleDestinationId);
+        return cartResolved.isPresent() && ruleResolved.isPresent() && cartResolved.get().equals(ruleResolved.get());
     }
 
     private void turnOffAllReleaseNode(List<BulbAction> out, String nodeId) {
@@ -689,60 +577,20 @@ public class DetectorRailHandler {
         setNodeControllers(out, nodeId, "RELEASE", "RIGHT", false);
     }
 
-    private void turnOffAllReleaseJunction(List<BulbAction> out, String junctionId) {
-        setJunctionControllers(out, junctionId, "RELEASE", null, false);
-        setJunctionControllers(out, junctionId, "RELEASE", "LEFT", false);
-        setJunctionControllers(out, junctionId, "RELEASE", "RIGHT", false);
-    }
-
     /** First cart that should get RELEASE: FIFO (index 0) or reversed/LIFO (last index). */
     private static String firstCartToRelease(List<String> held, boolean releaseReversed) {
         if (held == null || held.isEmpty()) return null;
         return releaseReversed ? held.get(held.size() - 1) : held.get(0);
     }
 
-    /** On CLEAR: turn off only controllers with + (DIVERT+, NOT_DIVERT+). Plain DIVERT/NOT_DIVERT are left as-is; ENTRY drives those. */
+    /** On CLEAR: set RELEASE controller bulbs from routing decision. */
     private void clearPlusControllersNode(List<BulbAction> out, String nodeId) {
-        for (String dir : new String[] { "LEFT", "RIGHT", null }) {
-            setNodeControllers(out, nodeId, "DIVERT+", dir, false);
-            setNodeControllers(out, nodeId, "NOT_DIVERT+", dir, false);
-        }
-    }
-
-    private void clearPlusControllersJunction(List<BulbAction> out, String junctionId) {
-        for (String dir : new String[] { "LEFT", "RIGHT", null }) {
-            setJunctionControllers(out, junctionId, "DIVERT+", dir, false);
-            setJunctionControllers(out, junctionId, "NOT_DIVERT+", dir, false);
-        }
     }
 
     private void setNodeControllers(List<BulbAction> out, String nodeId, String role, String direction, boolean on) {
         for (Controller c : controllerRepo.findByNodeAndRule(nodeId, role, direction)) {
             out.add(new BulbAction(c.getWorld(), c.getX(), c.getY(), c.getZ(), on, 0));
         }
-    }
-
-    private void setJunctionControllers(List<BulbAction> out, String junctionId, String role, String direction, boolean on) {
-        for (Controller c : controllerRepo.findByJunctionAndRule(junctionId, role, direction)) {
-            out.add(new BulbAction(c.getWorld(), c.getX(), c.getY(), c.getZ(), on, 0));
-        }
-    }
-
-    /** True if controller has any rule that is one of the given roles (e.g. TRANSFER or TRANSFER+) and direction matches (or no direction). */
-    private static boolean stationControllerRuleMatches(StationController c, String cartDir, String... roles) {
-        for (String role : roles) {
-            if (roleMatchesDir(c.getRule1Role(), c.getRule1Direction(), role, cartDir)) return true;
-            if (roleMatchesDir(c.getRule2Role(), c.getRule2Direction(), role, cartDir)) return true;
-            if (roleMatchesDir(c.getRule3Role(), c.getRule3Direction(), role, cartDir)) return true;
-            if (roleMatchesDir(c.getRule4Role(), c.getRule4Direction(), role, cartDir)) return true;
-        }
-        return false;
-    }
-
-    private static boolean roleMatchesDir(String ruleRole, String ruleDir, String role, String cartDir) {
-        if (ruleRole == null || !ruleRole.equals(role)) return false;
-        if (ruleDir == null || cartDir == null) return ruleDir == null;
-        return directionLabelsMatch(ruleDir, cartDir);
     }
 
     /** Treat L/LEFT and R/RIGHT as the same so NOT_TRA:L matches cart dir LEFT. */
@@ -752,44 +600,6 @@ public class DetectorRailHandler {
             || ("LEFT".equalsIgnoreCase(ruleDir) && "L".equalsIgnoreCase(cartDir))
             || ("R".equalsIgnoreCase(ruleDir) && "RIGHT".equalsIgnoreCase(cartDir))
             || ("RIGHT".equalsIgnoreCase(ruleDir) && "R".equalsIgnoreCase(cartDir));
-    }
-
-    /** Opposite of LEFT is RIGHT and vice versa; null unchanged. Used so ROU:L clears TRA:R and ROU:R clears TRA:L. */
-    private static String oppositeDirection(String dir) {
-        if (dir == null) return null;
-        if ("LEFT".equalsIgnoreCase(dir) || "L".equalsIgnoreCase(dir)) return "RIGHT";
-        if ("RIGHT".equalsIgnoreCase(dir) || "R".equalsIgnoreCase(dir)) return "LEFT";
-        return null;
-    }
-
-    /**
-     * When the cart CLEARs a node (exits the branch): turn off TRA/NOT_TRA for that node's station controllers
-     * so the switch resets after the cart has left the branch. Direction-aware (CLEAR:L clears TRA:L etc.).
-     */
-    private void clearStationTransferOnEntry(List<BulbAction> out, String stationId, String nodeId, String cartDir) {
-        for (StationController sc : stationControllerRepo.findByStationAndTarget(stationId, nodeId)) {
-            if (!shouldClearStationControllerOnEntry(sc, cartDir)) continue;
-            out.add(new BulbAction(sc.getWorld(), sc.getX(), sc.getY(), sc.getZ(), false, 0));
-        }
-    }
-
-    private static boolean shouldClearStationControllerOnEntry(StationController c, String cartDir) {
-        if (stationControllerClearRuleMatches(c.getRule1Role(), c.getRule1Direction(), cartDir)) return true;
-        if (stationControllerClearRuleMatches(c.getRule2Role(), c.getRule2Direction(), cartDir)) return true;
-        if (stationControllerClearRuleMatches(c.getRule3Role(), c.getRule3Direction(), cartDir)) return true;
-        if (stationControllerClearRuleMatches(c.getRule4Role(), c.getRule4Direction(), cartDir)) return true;
-        return false;
-    }
-
-    /** True if this rule should be cleared on ENTRY: + variant clears any; TRA/NOT_TRA with no dir clears any; with dir clears only when dir matches. */
-    private static boolean stationControllerClearRuleMatches(String ruleRole, String ruleDir, String cartDir) {
-        if (ruleRole == null) return false;
-        if ("TRANSFER+".equals(ruleRole) || "NOT_TRANSFER+".equals(ruleRole)) return true;
-        if ("TRANSFER".equals(ruleRole) || "NOT_TRANSFER".equals(ruleRole)) {
-            if (ruleDir == null) return true;
-            return ruleDir.equals(cartDir);
-        }
-        return false;
     }
 
     /** Merge same (world,x,y,z): keep last on state; max pulseMs. */
@@ -830,14 +640,13 @@ public class DetectorRailHandler {
             String pairedId = nodeOpt.get().getPairedNodeId();
             boolean releaseReversed = nodeOpt.get().isReleaseReversed();
             String terminalAddr = nodeOpt.flatMap(n -> stationRepo.findById(n.getStationId()).map(s -> n.terminalAddress(s.getAddress()))).orElse(null);
-            for (String evalDir : new String[] { "LEFT", "RIGHT", "" }) {
-                List<String> stillInQueue = cartRepo.findHeldCartsAtNode(nodeId, evalDir.isEmpty() ? "" : evalDir);
-                String nextToRelease = firstCartToRelease(stillInQueue, releaseReversed);
-                if (nextToRelease == null) continue;
+            List<String> stillInQueue = cartRepo.findHeldCartsAtNode(nodeId, "");
+            String nextToRelease = firstCartToRelease(stillInQueue, releaseReversed);
+            if (nextToRelease != null) {
                 String nextDest = cartRepo.find(nextToRelease).map(data -> (String) data.get("destination_address")).orElse(null);
-                if (nextDest == null || nextDest.isEmpty() || destIsForThisTerminal(nextDest, terminalAddr)) continue;
-                if (pairedId == null || routing.canDispatch(nextToRelease, nodeId, pairedId).canGo()) {
-                    setNodeControllers(bulbActions, nodeId, "RELEASE", evalDir.isEmpty() ? null : evalDir, true);
+                if (nextDest != null && !nextDest.isEmpty() && !destIsForThisTerminal(nextDest, terminalAddr)
+                    && (pairedId == null || routing.canDispatch(nextToRelease, nodeId, pairedId).canGo())) {
+                    setNodeControllers(bulbActions, nodeId, "RELEASE", null, true);
                 }
             }
             plugin.getServer().getScheduler().runTask(plugin, () -> {
@@ -862,6 +671,30 @@ public class DetectorRailHandler {
             this.z = z;
             this.on = on;
             this.pulseMs = pulseMs;
+        }
+    }
+
+    private static final class RailStateAction {
+        final String world;
+        final int x, y, z;
+        final String shapeName;
+
+        RailStateAction(String world, int x, int y, int z, String shapeName) {
+            this.world = world;
+            this.x = x;
+            this.y = y;
+            this.z = z;
+            this.shapeName = shapeName;
+        }
+    }
+
+    private static final class CruiseSpeedAction {
+        final String cartUuid;
+        final double magnitude;
+
+        CruiseSpeedAction(String cartUuid, double magnitude) {
+            this.cartUuid = cartUuid;
+            this.magnitude = magnitude;
         }
     }
 }

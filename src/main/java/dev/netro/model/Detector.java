@@ -8,7 +8,6 @@ public class Detector {
 
     private final String id;
     private final String nodeId;
-    private final String junctionId;
     private final String world;
     private final int x, y, z;
     private final int railX, railY, railZ;
@@ -22,7 +21,7 @@ public class Detector {
     private final String rule4Role;
     private final String rule4Direction;
 
-    public Detector(String id, String nodeId, String junctionId, String world,
+    public Detector(String id, String nodeId, String world,
                     int x, int y, int z, int railX, int railY, int railZ,
                     String signFacing, String rule1Role, String rule1Direction,
                     String rule2Role, String rule2Direction,
@@ -30,7 +29,6 @@ public class Detector {
                     String rule4Role, String rule4Direction) {
         this.id = id;
         this.nodeId = nodeId;
-        this.junctionId = junctionId;
         this.world = world;
         this.x = x;
         this.y = y;
@@ -51,7 +49,6 @@ public class Detector {
 
     public String getId() { return id; }
     public String getNodeId() { return nodeId; }
-    public String getJunctionId() { return junctionId; }
     public String getWorld() { return world; }
     public int getX() { return x; }
     public int getY() { return y; }
@@ -70,5 +67,9 @@ public class Detector {
     public String getRule4Direction() { return rule4Direction; }
 
     public boolean isForNode() { return nodeId != null; }
-    public boolean isForJunction() { return junctionId != null; }
+
+    public boolean hasRole(String role) {
+        if (role == null) return false;
+        return role.equals(rule1Role) || role.equals(rule2Role) || role.equals(rule3Role) || role.equals(rule4Role);
+    }
 }

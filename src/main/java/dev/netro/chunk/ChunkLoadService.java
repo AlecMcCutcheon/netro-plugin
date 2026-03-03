@@ -2,7 +2,6 @@ package dev.netro.chunk;
 
 import dev.netro.database.CartRepository;
 import dev.netro.database.DetectorRepository;
-import dev.netro.database.StationDetectorRepository;
 import dev.netro.database.StationRepository;
 import dev.netro.model.BlockPos;
 import dev.netro.model.Station;
@@ -23,11 +22,11 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * Keeps chunks loaded for detectors (stations, terminals, transfer, junction) and for carts in the DB.
- * Uses Paper's addPluginChunkTicket/removePluginChunkTicket when available; no-op on Spigot without Paper.
- * On enable: loads all stations (sign position), station detectors, and transfer/junction detectors from DB
- * and applies a 3x3 chunk ticket around each. Carts in cart_segments get current chunk + chunk ahead loaded
- * every 20 ticks; when a cart is removed from the DB we stop loading its chunks.
+ * Keeps chunks loaded for detectors (transfer, terminal) and for "managed" carts (carts in cart_segments).
+ * A cart becomes managed the first time any detector sees it (UnifiedCartSeenFlow adds it to the DB),
+ * so chunk loading applies as soon as a cart is detected. Uses Paper's addPluginChunkTicket/removePluginChunkTicket
+ * when available; no-op on Spigot without Paper. On enable: loads all stations and detectors from DB.
+ * Every 20 ticks, carts in cart_segments get current chunk + chunk ahead loaded; when removed from DB we stop.
  */
 public class ChunkLoadService {
 
@@ -36,7 +35,6 @@ public class ChunkLoadService {
 
     private final Plugin plugin;
     private final StationRepository stationRepo;
-    private final StationDetectorRepository stationDetectorRepo;
     private final DetectorRepository detectorRepo;
     private final CartRepository cartRepo;
 
@@ -49,12 +47,10 @@ public class ChunkLoadService {
 
     public ChunkLoadService(Plugin plugin,
                             StationRepository stationRepo,
-                            StationDetectorRepository stationDetectorRepo,
                             DetectorRepository detectorRepo,
                             CartRepository cartRepo) {
         this.plugin = plugin;
         this.stationRepo = stationRepo;
-        this.stationDetectorRepo = stationDetectorRepo;
         this.detectorRepo = detectorRepo;
         this.cartRepo = cartRepo;
         try {
@@ -71,11 +67,9 @@ public class ChunkLoadService {
         if (addTicketMethod == null) return;
         for (Station s : stationRepo.findAll())
             addChunksForBlock(s.getWorld(), s.getSignX(), s.getSignZ());
-        for (BlockPos p : stationDetectorRepo.listAllRailPositions())
-            addChunksForBlock(p.world(), p.x(), p.z());
         for (BlockPos p : detectorRepo.listAllRailPositions())
             addChunksForBlock(p.world(), p.x(), p.z());
-        plugin.getLogger().info("[Netro] Chunk loading: applied to all stations, station detectors, and transfer/junction detectors from DB.");
+        plugin.getLogger().info("[Netro] Chunk loading: applied to all stations and transfer/terminal detectors from DB.");
     }
 
     public void unloadAll() {

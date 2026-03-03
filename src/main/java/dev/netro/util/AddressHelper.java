@@ -1,11 +1,16 @@
 package dev.netro.util;
 
+import java.util.Optional;
+
 /**
  * Hierarchical address from world coordinates.
  * Zones: mainnet (4000 blocks) → cluster (500) → localnet (100) → station (sequential).
  * Uses block X for tier indices; same formula can use Z if needed for 2D grid.
  */
 public final class AddressHelper {
+
+    /** Parsed destination: station address (4-part) and optional terminal index (5th part). Single source of truth for address format. */
+    public record ParsedDestination(String stationAddress, Integer terminalIndex) {}
 
     public static final int MAINNET_SIZE = 4000;
     public static final int CLUSTER_SIZE = 500;
@@ -47,5 +52,28 @@ public final class AddressHelper {
     /** Five-tier terminal address: mainnet.cluster.localnet.station.terminal (e.g. "2.4.7.3.1"). */
     public static String terminalAddress(String stationAddressFourTier, int terminalIndex) {
         return stationAddressFourTier + "." + terminalIndex;
+    }
+
+    /**
+     * Parse a destination string into station address and optional terminal index.
+     * 4-part (e.g. 2.4.7.3) → station only; 5-part (e.g. 2.4.7.3.1) → station + terminal index.
+     * Returns empty if format is invalid (wrong number of parts or non-numeric terminal).
+     */
+    public static Optional<ParsedDestination> parseDestination(String destination) {
+        if (destination == null || destination.isBlank()) return Optional.empty();
+        String[] parts = destination.strip().split("\\.", -1);
+        if (parts.length == 4) {
+            return Optional.of(new ParsedDestination(destination.strip(), null));
+        }
+        if (parts.length == 5) {
+            try {
+                String stationAddress = parts[0] + "." + parts[1] + "." + parts[2] + "." + parts[3];
+                int terminalIndex = Integer.parseInt(parts[4]);
+                return Optional.of(new ParsedDestination(stationAddress, terminalIndex));
+            } catch (NumberFormatException e) {
+                return Optional.empty();
+            }
+        }
+        return Optional.empty();
     }
 }

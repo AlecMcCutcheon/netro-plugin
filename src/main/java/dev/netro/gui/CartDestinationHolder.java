@@ -81,12 +81,13 @@ public class CartDestinationHolder implements InventoryHolder {
             List.of("Address: " + address, "Click to set destination.")));
     }
 
-    /** Set specific terminal button. */
+    /** Set specific terminal button. Terminal index is 0-based; display is 1-based (Term 1, Term 2, ...). */
     public void setTerminalButton(int slot, TransferNode terminal, String stationAddress) {
-        String addr = stationAddress + "." + terminal.getTerminalIndex();
+        int idx = terminal.getTerminalIndex() != null ? terminal.getTerminalIndex() : 0;
+        String addr = stationAddress + "." + idx;
         slotToAddress.put(slot, addr);
         inventory.setItem(slot, newItem(Material.CHEST, terminal.getName(),
-            List.of("Terminal " + terminal.getTerminalIndex(), "Address: " + addr)));
+            List.of("Term " + (idx + 1), "Address: " + addr)));
     }
 
     public String getAddressForSlot(int slot) {

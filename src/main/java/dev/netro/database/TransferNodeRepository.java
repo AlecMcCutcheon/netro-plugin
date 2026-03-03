@@ -196,40 +196,6 @@ public class TransferNodeRepository {
         });
     }
 
-    public void upsertRoutingEntry(String id, String stationId, String destPrefix, String nextHopNodeId, int cost) {
-        database.withConnection(conn -> {
-            try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO routing_entries (id, station_id, dest_prefix, next_hop_node_id, cost) VALUES (?,?,?,?,?) " +
-                "ON CONFLICT(station_id, dest_prefix) DO UPDATE SET next_hop_node_id=excluded.next_hop_node_id, cost=excluded.cost")) {
-                ps.setString(1, id);
-                ps.setString(2, stationId);
-                ps.setString(3, destPrefix);
-                ps.setString(4, nextHopNodeId);
-                ps.setInt(5, cost);
-                ps.executeUpdate();
-            }
-            return null;
-        });
-    }
-
-    public Optional<String> lookupNextHopNode(String stationId, String destination) {
-        return database.withConnection(conn -> {
-            try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT next_hop_node_id FROM routing_entries WHERE station_id = ? AND (dest_prefix = ? OR ? LIKE dest_prefix || '.%') ORDER BY length(dest_prefix) DESC LIMIT 1")) {
-                ps.setString(1, stationId);
-                ps.setString(2, destination);
-                ps.setString(3, destination);
-                try (ResultSet rs = ps.executeQuery()) {
-                    return rs.next() ? Optional.of(rs.getString("next_hop_node_id")) : Optional.empty();
-                }
-            }
-        });
-    }
-
-    public Optional<String> findNodeIdAtBlock(String world, int x, int y, int z) {
-        return Optional.empty();
-    }
-
     /** Deletes the transfer node and all its block data (switches, hold switches, gate slots). Cascade will remove child rows. */
     public void deleteNodeAndAllBlockData(String nodeId) {
         database.withConnection(conn -> {
@@ -241,11 +207,7 @@ public class TransferNodeRepository {
         });
     }
 
-    public boolean isRailBlockUsedInWorld(String world, int x, int y, int z) {
-        return false;
-    }
-
-    /** Reference point for segment geometry: node's station sign position. */
+    /** Reference point: node's station sign position. */
     public Optional<int[]> getNodeRefPoint(String nodeId) {
         return database.withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(
