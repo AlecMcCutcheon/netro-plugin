@@ -6,7 +6,7 @@ This guide describes how the Netro plugin works, how to set it up, and how to us
 
 ## 1. What Netro Is and Why It Exists
 
-Netro is a Minecraft (Bukkit/Spigot 1.21) plugin for **rail networks**: stations, transfer nodes, terminals, and cart routing. It lets you:
+Netro is a Minecraft (Bukkit/Spigot 1.21.4) plugin for **rail networks**: stations, transfer nodes, terminals, and cart routing. It lets you:
 
 - Define **stations** with hierarchical addresses (e.g. `2.4.7.3`).
 - Attach **transfer nodes** (switches between lines) and **terminals** (parking slots at a station) to stations.
@@ -68,6 +68,8 @@ Roles are written on lines 3 and 4, space-separated. You can add a **direction**
 - **READY** — (Terminals only.) One per terminal. When a cart passes, the terminal **holds** the cart (increment held count, cart is “at” that terminal). Used with **RELEASE** on controllers to release the next cart in queue when it’s their turn.
 - **RELEASE** — Used on **controller** signs (see below), not on detectors. Controllers with RELEASE are turned ON when the routing logic decides to release a cart from that terminal.
 
+Only **ENTRY** and **CLEAR** apply rules; **READY** detectors do not run the rule engine.
+
 So: **entry vs clear** is determined by **direction**. One detector can have both `ENTRY L` and `CLEAR R` (or no direction for “any direction” for ENTRY/CLEAR where the code allows it). The important fix for “set cruise speed on CLEAR” is that CLEAR now only fires when the cart’s direction matches the rule’s direction (e.g. clearing to the right), not when entering.
 
 ---
@@ -126,7 +128,7 @@ Both nodes now reference each other. Unpairing is done in the same Rules UI (con
 - **Sneak + right-click** a **[Transfer]** or **[Terminal]** sign (the sign on the copper bulb).  
   This opens the **Rules** screen for that detector’s node (transfer or terminal).
 
-You can also reach rules from the **station menu**: Railroad Controller → right-click [Station] sign → click a node → **Open rules**.
+You can also reach rules from the **station menu**: Railroad Controller → right-click [Station] sign → click a node. That opens **Node Options** (Open rules, Relocate, Delete). Click **Open rules** for the Rules screen, or **Relocate** to move this node’s detector/controller without opening rules.
 
 ### 8.2 Rules Screen Layout
 
@@ -134,18 +136,21 @@ You can also reach rules from the **station menu**: Railroad Controller → righ
 - **Slot 45** — “Default blocked policy” (when the chosen next hop is blocked; not a deletable rule).
 - **Slot 46** — **Pair transfer node…** (transfer context only).
 - **Slot 49** — **Create rule**.
+- **Slot 52** — **Relocate** — Move this node's detector or controller. Click Relocate, then click the block you want it placed *above* (one-click; you do not click the current bulb). The block *above* your target is where the bulb and sign go. Also in Node Options (station menu → click node).
 - **Slot 53** — **Close**.
 
-Click **Create rule** to add a new rule. You then go through: **Trigger** → **Destination** → **Action**.
+Click **Create rule** to add a new rule. You then go through: **Trigger** → **Destination** → **Action**. While choosing a block for **Relocate** or a rail for **Set rail state**, the block you’re looking at is **highlighted** (relocate: the block above, where the bulb will go; set rail state: slab-sized outline on normal rails only).
 
 ### 8.3 Step 1: Trigger
 
+Only **ENTRY** and **CLEAR** detector events apply rules. **READY** (terminals only) is for slot-holding; READY detectors do *not* run rules.
+
 | Trigger    | When it fires |
 |-----------|----------------|
-| **When cart enters** | **ENTERING** — Fires when the detector fires with **ENTRY** or **READY** (cart entering the node / slot). |
+| **When cart enters** | **ENTERING** — Fires when the detector fires with **ENTRY**. READY does not apply rules. |
 | **When cart clears** | **CLEARING** — Fires when the detector fires with **CLEAR** (cart leaving). Direction on the detector sign is respected (e.g. CLEAR R only when actually clearing to the right). |
 | **When terminal blocked** | **BLOCKED** — When the next hop (e.g. a terminal) is full or invalid. You then pick a “redirect” destination; the rule’s action can be **Set destination** to that redirect. One such rule per blocked-hop case. |
-| **When cart detected** | **DETECTED** — Fires on **any** pass of the detector (any role/direction). |
+| **When cart detected** | **DETECTED** — Fires when the detector fires with **ENTRY** or **CLEAR** (the two roles that apply rules). |
 
 ### 8.4 Step 2: Destination
 
@@ -162,7 +167,7 @@ Destination is compared against the cart’s current destination (or the “loca
 |--------|--------|
 | **Turn bulb ON** | **SEND_ON** — Set controller bulbs with the matching **RULE:N** for this node to ON. |
 | **Turn bulb OFF** | **SEND_OFF** — Set those bulbs to OFF. |
-| **Set rail state** | **SET_RAIL_STATE** — Change the detector rail’s shape (N/S/E/W/curves). You then use the Railroad Controller on the rail to pick the shape. |
+| **Set rail state** | **SET_RAIL_STATE** — Change the detector rail’s shape (N/S/E/W/curves). Close the UI, then right-click a **normal rail** with the Railroad Controller to open the shape picker; pick two directions to set the shape. **Cancel** (center) in the shape picker returns to the Action menu; it does not cancel the rule. When editing a rule’s rail state, you must pick a rail and shape (no immediate “updated”). |
 | **Set cart speed (cruise)** | **SET_CRUISE_SPEED** — Set the cart’s cruise speed (0.0–9.9 in the GUI, stored as magnitude 0–1). The cart’s “cruise” mode is turned on so it keeps that speed until something else (e.g. READY hold) overrides it. |
 
 For **BLOCKED** trigger, the action is typically **Set destination** to a redirect (e.g. another terminal or station).
@@ -172,10 +177,7 @@ For **BLOCKED** trigger, the action is typically **Set destination** to a redire
 ## 9. Cart Controller and Destinations
 
 - **Cart Controller** — Get it with **`/netro cartcontroller`**. Right-click a cart (or use while in the cart) to open the **cart menu**.
-- In the cart menu you can:
-  - Set **destination** (station or station:terminal, e.g. `Snowy2` or `Snowy2:0`).
-  - See **Stop** / **Start** (cruise): Stop = cruise off (detectors/rails control speed); Start = cruise on (re-apply set speed when not held).
-  - Adjust **speed** (1–10) when in cruise.
+- In the cart menu: **Stop** (cruise off), **Lower speed**, **Disable Cruise** (center), **Increase speed**, **Start** (cruise on); **Direction** (reverse); **Destination** (station or station:terminal, e.g. `Snowy2` or `Snowy2:0`). Adjust speed (1–10) when in cruise.
 
 - **Set destination (command)** — **`/netro setdestination <address\|name\|StationName:TerminalIndex\|StationName:TerminalName>`**  
   Examples: `2.4.7.3`, `Snowy2`, `Snowy2:0`, `Snowy2:Platform A`. You can look at a cart and run the command, or use the cart menu.
@@ -203,12 +205,12 @@ All commands are under **`/netro`**:
 ## 11. Summary: Entry and Clear vs Ready and Release
 
 - **ENTRY** / **CLEAR** on a **detector sign** define **when** the detector “fires” (by cart direction).  
-  **ENTERING** / **CLEARING** in **rules** are the trigger types that match those events.
-- **READY** (one per terminal) is the moment the cart is **held** at that terminal slot (count incremented, zone set, release decision made).
+  **ENTERING** / **CLEARING** in **rules** match those events. **Only ENTRY and CLEAR apply rules**; READY does not.
+- **READY** (one per terminal) is the moment the cart is **held** at that terminal slot (count incremented, zone set, release decision made). READY detectors do *not* run the rule engine.
 - **RELEASE** on a **controller** is the output: “power the release mechanism” when the plugin decides to release the next cart from that terminal.
 - **CLEAR** on the detector is when the cart **leaves** the slot (count decremented, release turned off, next cart in queue may get RELEASE).
 
-So: **ENTRY** → cart entering the node; **READY** → cart taken into the terminal slot and held; **RELEASE** → mechanism powered to let one cart out; **CLEAR** → cart has left, update state and possibly release the next.
+So: **ENTRY** → cart entering the node (rules can fire); **READY** → cart held in slot (no rules); **RELEASE** → mechanism on; **CLEAR** → cart left, update state (rules can fire).
 
 ---
 

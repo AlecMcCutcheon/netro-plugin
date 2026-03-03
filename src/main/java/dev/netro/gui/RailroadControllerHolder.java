@@ -207,8 +207,8 @@ public class RailroadControllerHolder implements InventoryHolder {
         ItemMeta meta = item.getItemMeta();
         if (meta != null) {
             if (pendingRule.isPresent()) {
-                meta.setDisplayName("Cancel");
-                meta.setLore(List.of("Cancel and do not create the rule."));
+                meta.setDisplayName("Back to action menu");
+                meta.setLore(List.of("Cancel rail shape choice and return to action menu."));
             } else {
                 meta.setDisplayName("Clear / Reset");
                 meta.setLore(List.of("Clear selection without changing the rail."));

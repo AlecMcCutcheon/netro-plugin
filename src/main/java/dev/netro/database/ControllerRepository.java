@@ -53,6 +53,22 @@ public class ControllerRepository {
         });
     }
 
+    /** Update controller position after relocate. */
+    public void updatePosition(String id, String world, int x, int y, int z) {
+        database.withConnection(conn -> {
+            try (PreparedStatement ps = conn.prepareStatement(
+                "UPDATE controllers SET world = ?, x = ?, y = ?, z = ? WHERE id = ?")) {
+                ps.setString(1, world);
+                ps.setInt(2, x);
+                ps.setInt(3, y);
+                ps.setInt(4, z);
+                ps.setString(5, id);
+                ps.executeUpdate();
+            }
+            return null;
+        });
+    }
+
     /** Find controllers for this node that match role and direction (direction null = any). */
     public List<Controller> findByNodeAndRule(String nodeId, String role, String direction) {
         return database.withConnection(conn -> {

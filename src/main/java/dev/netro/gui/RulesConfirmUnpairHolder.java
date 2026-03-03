@@ -29,8 +29,8 @@ public class RulesConfirmUnpairHolder implements InventoryHolder {
         this.pairedLabel = pairedLabel == null ? "?" : pairedLabel;
         this.rulesTitle = rulesTitle == null ? "Rules" : rulesTitle;
         this.inventory = Bukkit.createInventory(this, SIZE, "Unpair from " + this.pairedLabel + "?");
-        inventory.setItem(SLOT_CANCEL, newItem(Material.LIME_WOOL, "Cancel", List.of("Keep pairing.", "Return to rules.")));
-        inventory.setItem(SLOT_CONFIRM, newItem(Material.RED_WOOL, "Unpair", List.of("Clear pairing on both nodes.", "Routes will be rebuilt.")));
+        inventory.setItem(SLOT_CANCEL, newItem(Material.LIME_WOOL, "Cancel", List.of("Keep pairing.")));
+        inventory.setItem(SLOT_CONFIRM, newItem(Material.RED_WOOL, "Unpair", List.of("Unpair both nodes.")));
     }
 
     private static ItemStack newItem(Material material, String name, List<String> lore) {

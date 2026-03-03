@@ -14,7 +14,9 @@ import org.bukkit.inventory.meta.ItemMeta;
 import java.util.List;
 import java.util.UUID;
 
-/** Step 3 of create rule: choose action (SEND_ON, SEND_OFF, or SET_RAIL_STATE). */
+import org.bukkit.enchantments.Enchantment;
+
+/** Step 3 of create rule: choose action (SEND_ON, SEND_OFF, SET_RAIL_STATE, SET_CRUISE_SPEED). When editing, Save is shown. */
 public class RulesCreateStep3Holder implements InventoryHolder {
 
     public static final int SIZE = 27;
@@ -23,6 +25,7 @@ public class RulesCreateStep3Holder implements InventoryHolder {
     public static final int SLOT_SET_RAIL = 14;
     public static final int SLOT_SET_CRUISE_SPEED = 16;
     public static final int SLOT_BACK = 22;
+    public static final int SLOT_SAVE = 20;
 
     private final NetroPlugin plugin;
     private final String contextType;
@@ -32,10 +35,23 @@ public class RulesCreateStep3Holder implements InventoryHolder {
     private final String triggerType;
     private final boolean destinationPositive;
     private final String destinationId;
+    private final Rule editRule;
+    /** When set, "Set rail state" was chosen and this is the action_data (e.g. world,x,y,z,shape). Show in UI and save on Save. */
+    private final String selectedRailStateActionData;
     private final Inventory inventory;
 
     public RulesCreateStep3Holder(NetroPlugin plugin, String contextType, String contextId, String contextSide,
                                  String rulesTitle, String triggerType, boolean destinationPositive, String destinationId) {
+        this(plugin, contextType, contextId, contextSide, rulesTitle, triggerType, destinationPositive, destinationId, null, null);
+    }
+
+    public RulesCreateStep3Holder(NetroPlugin plugin, String contextType, String contextId, String contextSide,
+                                 String rulesTitle, String triggerType, boolean destinationPositive, String destinationId, Rule editRule) {
+        this(plugin, contextType, contextId, contextSide, rulesTitle, triggerType, destinationPositive, destinationId, editRule, null);
+    }
+
+    public RulesCreateStep3Holder(NetroPlugin plugin, String contextType, String contextId, String contextSide,
+                                 String rulesTitle, String triggerType, boolean destinationPositive, String destinationId, Rule editRule, String selectedRailStateActionData) {
         this.plugin = plugin;
         this.contextType = contextType;
         this.contextId = contextId;
@@ -44,12 +60,59 @@ public class RulesCreateStep3Holder implements InventoryHolder {
         this.triggerType = triggerType;
         this.destinationPositive = destinationPositive;
         this.destinationId = destinationId;
-        this.inventory = Bukkit.createInventory(this, SIZE, "Rule: Action");
-        inventory.setItem(SLOT_SEND_ON, newItem(Material.REDSTONE_LAMP, "Turn bulb ON", List.of("Action: SEND_ON", "Set controller bulbs to on.")));
-        inventory.setItem(SLOT_SEND_OFF, newItem(Material.GUNPOWDER, "Turn bulb OFF", List.of("Action: SEND_OFF", "Set controller bulbs to off.")));
-        inventory.setItem(SLOT_SET_RAIL, newItem(Material.RAIL, "Set rail state", List.of("Action: SET_RAIL_STATE", "Set the detector rail shape. Then use Railroad Controller on a rail to pick N/S/E/W directions.")));
-        inventory.setItem(SLOT_SET_CRUISE_SPEED, newItem(Material.POWERED_RAIL, "Set cart speed (cruise)", List.of("Action: SET_CRUISE_SPEED", "Set the cart's cruise speed (0.0–9.9).")));
-        inventory.setItem(SLOT_BACK, newItem(Material.ARROW, "Back", List.of("Return to destination choice.")));
+        this.editRule = editRule;
+        this.selectedRailStateActionData = selectedRailStateActionData;
+        String title = editRule != null ? "Rule: Action (editing)" : "Rule: Action";
+        this.inventory = Bukkit.createInventory(this, SIZE, title);
+        ItemStack sendOn = newItem(Material.REDSTONE_LAMP, "Turn bulb ON", List.of("Bulbs ON."));
+        ItemStack sendOff = newItem(Material.GUNPOWDER, "Turn bulb OFF", List.of("Bulbs OFF."));
+        ItemStack setRail;
+        if (selectedRailStateActionData != null && !selectedRailStateActionData.isEmpty()) {
+            String display = formatRailStateDisplay(selectedRailStateActionData);
+            setRail = newItem(Material.RAIL, "Set rail state", List.of("Chosen: " + display, "Save or click to change."));
+            enchant(setRail);
+        } else {
+            setRail = newItem(Material.RAIL, "Set rail state", List.of("Pick rail with controller."));
+            if (editRule != null && Rule.ACTION_SET_RAIL_STATE.equals(editRule.getActionType())) enchant(setRail);
+        }
+        ItemStack cruise = newItem(Material.POWERED_RAIL, "Set cart speed (cruise)", List.of("Speed 0.0–9.9."));
+        if (editRule != null) {
+            String at = editRule.getActionType();
+            if (Rule.ACTION_SEND_ON.equals(at)) enchant(sendOn);
+            else if (Rule.ACTION_SEND_OFF.equals(at)) enchant(sendOff);
+            else if (Rule.ACTION_SET_CRUISE_SPEED.equals(at)) enchant(cruise);
+        }
+        inventory.setItem(SLOT_SEND_ON, sendOn);
+        inventory.setItem(SLOT_SEND_OFF, sendOff);
+        inventory.setItem(SLOT_SET_RAIL, setRail);
+        inventory.setItem(SLOT_SET_CRUISE_SPEED, cruise);
+        inventory.setItem(SLOT_BACK, newItem(Material.ARROW, "Back", List.of("Back.")));
+        if (editRule != null || selectedRailStateActionData != null) {
+            inventory.setItem(SLOT_SAVE, newItem(Material.EMERALD, "Save and go back", List.of("Save & back.")));
+        }
+    }
+
+    /** Format actionData "world,x,y,z,shape" as "x, y, z: Shape Name". */
+    private static String formatRailStateDisplay(String actionData) {
+        if (actionData == null) return "—";
+        String[] parts = actionData.split(",", -1);
+        if (parts.length >= 5) {
+            String shape = parts[4].trim().replace("_", " ");
+            return parts[1] + ", " + parts[2] + ", " + parts[3] + " → " + shape;
+        }
+        return actionData.replace("_", " ");
+    }
+
+    private static void enchant(ItemStack stack) {
+        ItemMeta meta = stack.getItemMeta();
+        if (meta != null) {
+            meta.addEnchant(Enchantment.UNBREAKING, 1, true);
+            if (meta.hasDisplayName()) {
+                String name = meta.getDisplayName();
+                if (name != null && !name.startsWith("§l")) meta.setDisplayName("§l" + name);
+            }
+        }
+        stack.setItemMeta(meta);
     }
 
     private static ItemStack newItem(Material material, String name, List<String> lore) {
@@ -71,6 +134,9 @@ public class RulesCreateStep3Holder implements InventoryHolder {
     public String getTriggerType() { return triggerType; }
     public boolean isDestinationPositive() { return destinationPositive; }
     public String getDestinationId() { return destinationId; }
+    public Rule getEditRule() { return editRule; }
+    public boolean isEditMode() { return editRule != null; }
+    public String getSelectedRailStateActionData() { return selectedRailStateActionData; }
 
     /** Create the rule with chosen action and close. Returns the new rule index for message. */
     public int createRule(String actionType) {

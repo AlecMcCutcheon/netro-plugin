@@ -41,6 +41,8 @@ public class NetroPlugin extends JavaPlugin {
     private ChunkLoadService chunkLoadService;
     /** When non-null, next rail-controller click on a rail opens the direction UI to choose shape for this rule. */
     private final Map<UUID, dev.netro.gui.PendingSetRailStateRule> pendingSetRailStateByPlayer = new ConcurrentHashMap<>();
+    /** When non-null, player is in relocate flow: click source block then target block (placed above). */
+    private final Map<UUID, dev.netro.gui.PendingRelocate> pendingRelocateByPlayer = new ConcurrentHashMap<>();
 
     @Override
     public void onEnable() {
@@ -75,7 +77,11 @@ public class NetroPlugin extends JavaPlugin {
         this.cartControllerGuiListener = guiListener;
         getServer().getPluginManager().registerEvents(guiListener, this);
         guiListener.startRefreshTask();
+        new dev.netro.gui.CartControllerBossBarUpdater(this).start();
         getServer().getPluginManager().registerEvents(new dev.netro.gui.RailroadControllerOpenListener(this), this);
+        getServer().getPluginManager().registerEvents(new dev.netro.gui.RelocateBlockListener(this), this);
+        getServer().getPluginManager().registerEvents(new dev.netro.gui.RelocateBlockListener(this), this);
+        getServer().getScheduler().runTaskTimer(this, new dev.netro.gui.BlockHighlightTask(this), 5L, 5L);
 
         scheduleStaleCartCleanup();
 
@@ -200,5 +206,14 @@ public class NetroPlugin extends JavaPlugin {
     public void setPendingSetRailState(java.util.UUID playerUuid, dev.netro.gui.PendingSetRailStateRule pending) {
         if (pending == null) pendingSetRailStateByPlayer.remove(playerUuid);
         else pendingSetRailStateByPlayer.put(playerUuid, pending);
+    }
+
+    public dev.netro.gui.PendingRelocate getPendingRelocate(java.util.UUID playerUuid) {
+        return pendingRelocateByPlayer.get(playerUuid);
+    }
+
+    public void setPendingRelocate(java.util.UUID playerUuid, dev.netro.gui.PendingRelocate pending) {
+        if (pending == null) pendingRelocateByPlayer.remove(playerUuid);
+        else pendingRelocateByPlayer.put(playerUuid, pending);
     }
 }

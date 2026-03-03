@@ -5,6 +5,7 @@ import dev.netro.database.RuleRepository;
 import dev.netro.database.StationRepository;
 import dev.netro.database.TransferNodeRepository;
 import dev.netro.model.Rule;
+import dev.netro.model.Station;
 import dev.netro.model.TransferNode;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
@@ -15,10 +16,11 @@ import org.bukkit.inventory.meta.ItemMeta;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * 54-slot UI for managing rules in a context (transfer node or terminal).
- * Slots 0–44: rule items. Slot 45: default blocked policy. Slot 46: Pair (transfer only). Slot 49: Create rule. Slot 53: Close.
+ * Slots 0–44: rule items. Slot 45: default blocked policy. Slot 46: Pair (transfer only). Slot 49: Create rule. Slot 52: Relocate. Slot 53: Close.
  */
 public class RulesMainHolder implements InventoryHolder {
 
@@ -31,6 +33,8 @@ public class RulesMainHolder implements InventoryHolder {
     /** Pair transfer node (transfer context only). */
     public static final int SLOT_ACTION = 46;
     public static final int SLOT_CREATE = 49;
+    /** Relocate a detector or controller for this node (next to Close for symmetry). */
+    public static final int SLOT_RELOCATE = 52;
     public static final int SLOT_CLOSE = 53;
 
     private final NetroPlugin plugin;
@@ -61,18 +65,23 @@ public class RulesMainHolder implements InventoryHolder {
 
     private void fillLayout() {
         inventory.clear();
+        StationRepository stationRepo = new StationRepository(plugin.getDatabase());
+        TransferNodeRepository nodeRepo = new TransferNodeRepository(plugin.getDatabase());
         for (int i = RULES_START; i <= RULES_END; i++) {
             if (i < rules.size()) {
                 Rule r = rules.get(i);
-                inventory.setItem(i, ruleItem(r));
+                inventory.setItem(i, ruleItem(r, stationRepo, nodeRepo));
             }
         }
         inventory.setItem(SLOT_DEFAULT_POLICY, defaultPolicyItem());
         if ("transfer".equals(contextType) && contextId != null) {
             inventory.setItem(SLOT_ACTION, pairButtonItem());
         }
-        inventory.setItem(SLOT_CREATE, newItem(Material.LIME_DYE, "Create rule", List.of("Add a new rule for this context.")));
-        inventory.setItem(SLOT_CLOSE, newItem(Material.ARROW, "Close", List.of("Close this menu.")));
+        inventory.setItem(SLOT_CREATE, newItem(Material.WRITABLE_BOOK, "Create rule", List.of("Add rule.")));
+        if (contextId != null) {
+            inventory.setItem(SLOT_RELOCATE, newItem(Material.ENDER_PEARL, "Relocate", List.of("Move a detector or controller to a new spot.")));
+        }
+        inventory.setItem(SLOT_CLOSE, newItem(Material.ARROW, "Close", List.of("Close.")));
     }
 
     private ItemStack pairButtonItem() {
@@ -91,7 +100,7 @@ public class RulesMainHolder implements InventoryHolder {
                 lore.add("Paired to " + label);
             }
         }
-        return newItem(Material.ENDER_PEARL, "Pair transfer node…", lore);
+        return newItem(Material.ENDER_EYE, "Pair transfer node…", lore);
     }
 
     public static String formatStationNode(String nodeId, StationRepository stationRepo, TransferNodeRepository nodeRepo) {
@@ -99,6 +108,29 @@ public class RulesMainHolder implements InventoryHolder {
         if (nodeOpt.isEmpty()) return nodeId;
         TransferNode n = nodeOpt.get();
         return stationRepo.findById(n.getStationId()).map(st -> st.getName() + ":" + n.getName()).orElse(n.getName());
+    }
+
+    /** Resolve destination id to a display name (StationName:NodeName). Terminals are stored as address.terminalIndex; resolve to names. */
+    public static String formatDestinationId(String destId, StationRepository stationRepo, TransferNodeRepository nodeRepo) {
+        if (destId == null || destId.isEmpty()) return "?";
+        int lastDot = destId.lastIndexOf('.');
+        if (lastDot > 0 && lastDot < destId.length() - 1) {
+            String address = destId.substring(0, lastDot);
+            String indexStr = destId.substring(lastDot + 1);
+            try {
+                int terminalIndex = Integer.parseInt(indexStr);
+                Optional<Station> stOpt = stationRepo.findByAddress(address);
+                if (stOpt.isPresent()) {
+                    Station st = stOpt.get();
+                    for (TransferNode node : nodeRepo.findTerminals(st.getId())) {
+                        if (node.getTerminalIndex() != null && node.getTerminalIndex() == terminalIndex) {
+                            return st.getName() + ":" + node.getName();
+                        }
+                    }
+                }
+            } catch (NumberFormatException ignored) { }
+        }
+        return destId;
     }
 
     private static ItemStack defaultPolicyItem() {
@@ -112,14 +144,16 @@ public class RulesMainHolder implements InventoryHolder {
         return newItem(Material.BOOK, "Default when blocked", lore);
     }
 
-    private static ItemStack ruleItem(Rule r) {
+    private static ItemStack ruleItem(Rule r, StationRepository stationRepo, TransferNodeRepository nodeRepo) {
         List<String> lore = new ArrayList<>();
         lore.add("Trigger: " + r.getTriggerType());
         if (Rule.TRIGGER_BLOCKED.equals(r.getTriggerType())) {
-            lore.add("When hop to " + (r.getDestinationId() != null ? r.getDestinationId() : "?") + " is blocked");
-            lore.add("Action: set destination to " + (r.getActionData() != null ? r.getActionData() : "?"));
+            String destDisplay = formatDestinationId(r.getDestinationId(), stationRepo, nodeRepo);
+            lore.add("When hop to " + destDisplay + " is blocked");
+            String actionDestDisplay = formatDestinationId(r.getActionData(), stationRepo, nodeRepo);
+            lore.add("Action: set destination to " + actionDestDisplay);
         } else {
-            String dest = r.getDestinationId() == null || r.getDestinationId().isEmpty() ? "any" : r.getDestinationId();
+            String dest = r.getDestinationId() == null || r.getDestinationId().isEmpty() ? "any" : formatDestinationId(r.getDestinationId(), stationRepo, nodeRepo);
             String cond = r.isDestinationPositive() ? "to " + dest : "not to " + dest;
             lore.add("When cart " + cond);
             if (Rule.ACTION_SET_CRUISE_SPEED.equals(r.getActionType())) {
@@ -167,6 +201,7 @@ public class RulesMainHolder implements InventoryHolder {
 
     /** Pair button (transfer context only). */
     public boolean isPairSlot(int slot) { return slot == SLOT_ACTION && "transfer".equals(contextType); }
+    public boolean isRelocateSlot(int slot) { return slot == SLOT_RELOCATE; }
     public boolean isSegmentSlot(int slot) { return false; }
 
     public boolean isCreateSlot(int slot) { return slot == SLOT_CREATE; }

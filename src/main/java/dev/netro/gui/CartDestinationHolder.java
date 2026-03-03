@@ -61,7 +61,7 @@ public class CartDestinationHolder implements InventoryHolder {
     public void setStationButton(int slot, Station station) {
         slotToStation.put(slot, station);
         inventory.setItem(slot, newItem(Material.MINECART, station.getName(),
-            List.of("Address: " + station.getAddress(), "Click to set destination.")));
+            List.of("Click to set destination.")));
     }
 
     /** Station at slot on STATIONS page (for opening terminal sub-menu without display-name lookup). */
@@ -78,16 +78,16 @@ public class CartDestinationHolder implements InventoryHolder {
     public void setStationAnyButton(int slot, String stationName, String address) {
         slotToAddress.put(slot, address);
         inventory.setItem(slot, newItem(Material.RAIL, stationName + " (any)",
-            List.of("Address: " + address, "Click to set destination.")));
+            List.of("Click to set destination.")));
     }
 
-    /** Set specific terminal button. Terminal index is 0-based; display is 1-based (Term 1, Term 2, ...). */
-    public void setTerminalButton(int slot, TransferNode terminal, String stationAddress) {
+    /** Set specific terminal button. stationName is used for display in lore. */
+    public void setTerminalButton(int slot, TransferNode terminal, String stationAddress, String stationName) {
         int idx = terminal.getTerminalIndex() != null ? terminal.getTerminalIndex() : 0;
         String addr = stationAddress + "." + idx;
         slotToAddress.put(slot, addr);
         inventory.setItem(slot, newItem(Material.CHEST, terminal.getName(),
-            List.of("Term " + (idx + 1), "Address: " + addr)));
+            List.of(stationName + ": " + terminal.getName())));
     }
 
     public String getAddressForSlot(int slot) {

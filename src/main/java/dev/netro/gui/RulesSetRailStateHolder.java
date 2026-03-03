@@ -55,9 +55,9 @@ public class RulesSetRailStateHolder implements InventoryHolder {
         for (int i = 0; i < SHAPES.length && i < SLOT_FOR_SHAPE.length; i++) {
             Rail.Shape shape = SHAPES[i];
             String name = shape.name().replace("_", " ");
-            inventory.setItem(SLOT_FOR_SHAPE[i], newItem(Material.RAIL, name, List.of("Set detector rail to " + name)));
+            inventory.setItem(SLOT_FOR_SHAPE[i], newItem(Material.RAIL, name, List.of("Shape: " + name)));
         }
-        inventory.setItem(SLOT_BACK, newItem(Material.ARROW, "Back", List.of("Return to action choice.")));
+        inventory.setItem(SLOT_BACK, newItem(Material.ARROW, "Back", List.of("Back.")));
     }
 
     private static ItemStack newItem(Material material, String name, List<String> lore) {

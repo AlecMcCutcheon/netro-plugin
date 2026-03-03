@@ -12,16 +12,22 @@ import org.bukkit.util.Vector;
 import java.util.List;
 import java.util.Locale;
 
-/** Main cart controller menu: speed +/- , stop, start, change direction, destination. */
+/**
+ * Main cart controller menu. Symmetric 3-row layout:
+ * Row 0: [ ] [ ] [ ] [ ] [ ] [ ] [ ] [ ] [ ]
+ * Row 1: [ ] [Stop] [Lower] [Disable Cruise] [Increase] [Start] [ ] [ ] [ ]
+ * Row 2: [ ] [ ] [ ] [Direction] [ ] [Destination] [ ] [ ] [ ]
+ */
 public class CartMenuHolder implements InventoryHolder {
 
     public static final int SIZE = 27;
-    public static final int SLOT_INCREASE = 2;
-    public static final int SLOT_LOWER = 11;
-    public static final int SLOT_STOP = 9;
+    public static final int SLOT_STOP = 11;
+    public static final int SLOT_LOWER = 12;
+    public static final int SLOT_DISABLE_CRUISE = 13;
+    public static final int SLOT_INCREASE = 14;
     public static final int SLOT_START = 15;
     public static final int SLOT_DIR = 21;
-    public static final int SLOT_DEST = 22;
+    public static final int SLOT_DEST = 23;
 
     private final String cartUuid;
     private final Inventory inventory;
@@ -42,12 +48,13 @@ public class CartMenuHolder implements InventoryHolder {
     }
 
     private void fillLayout() {
-        inventory.setItem(SLOT_INCREASE, newItem(Material.REDSTONE_TORCH, "Increase Speed by 1", List.of("Current speed: —")));
+        inventory.setItem(SLOT_INCREASE, newItem(Material.FIREWORK_ROCKET, "Increase Speed by 1", List.of("Current speed: —")));
         inventory.setItem(SLOT_LOWER, newItem(Material.LEVER, "Lower Speed by 1", List.of("Current speed: —")));
         inventory.setItem(SLOT_STOP, newItem(Material.BARRIER, "Stop", List.of("Stops the cart and saves speed.")));
-        inventory.setItem(SLOT_START, newItem(Material.LIME_DYE, "Start", List.of("Resume with saved speed.")));
+        inventory.setItem(SLOT_START, newItem(Material.LIME_WOOL, "Start", List.of("Resume with saved speed.")));
+        inventory.setItem(SLOT_DISABLE_CRUISE, newItem(Material.BLAZE_POWDER, "Disable Cruise", List.of("Turn cruise off; cart keeps moving.")));
         inventory.setItem(SLOT_DIR, newItem(Material.OAK_SIGN, "Change Direction", List.of("Current: —", "Click to reverse.")));
-        inventory.setItem(SLOT_DEST, newItem(Material.EMERALD, "Destination", List.of("Set cart destination.")));
+        inventory.setItem(SLOT_DEST, newItem(Material.MAP, "Destination", List.of("Set cart destination.")));
     }
 
     /** Update item lores with live cart state (current speed, heading, cruise/stopped, current destination). Call every ~20 ticks. */
@@ -65,6 +72,7 @@ public class CartMenuHolder implements InventoryHolder {
         updateItemLore(SLOT_LOWER, List.of("Current speed: " + String.format("%.2f", speed), setSpeedLine));
         updateItemLore(SLOT_STOP, List.of("Stops the cart and saves speed.", "Mode: " + mode));
         updateItemLore(SLOT_START, List.of("Resume with saved speed.", "Mode: " + mode));
+        updateItemLore(SLOT_DISABLE_CRUISE, List.of("Turn cruise off; cart keeps moving.", "Mode: " + mode));
         updateItemLore(SLOT_DIR, List.of("Current: " + heading, "Click to head " + opposite));
         updateItemLore(SLOT_DEST, List.of("Set cart destination.", "Current: " + destLine));
     }

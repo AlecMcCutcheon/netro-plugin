@@ -57,6 +57,25 @@ public class DetectorRepository {
         });
     }
 
+    /** Update detector position (bulb and rail coords) after relocate. */
+    public void updatePosition(String id, String world, int x, int y, int z, int railX, int railY, int railZ) {
+        database.withConnection(conn -> {
+            try (PreparedStatement ps = conn.prepareStatement(
+                "UPDATE detectors SET world = ?, x = ?, y = ?, z = ?, rail_x = ?, rail_y = ?, rail_z = ? WHERE id = ?")) {
+                ps.setString(1, world);
+                ps.setInt(2, x);
+                ps.setInt(3, y);
+                ps.setInt(4, z);
+                ps.setInt(5, railX);
+                ps.setInt(6, railY);
+                ps.setInt(7, railZ);
+                ps.setString(8, id);
+                ps.executeUpdate();
+            }
+            return null;
+        });
+    }
+
     public Optional<Detector> findById(String id) {
         return database.withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(

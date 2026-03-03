@@ -16,6 +16,7 @@ public class StationNodeOptionsHolder implements InventoryHolder {
     public static final int SIZE = 27;
     public static final int SLOT_BACK = 0;
     public static final int SLOT_OPEN_RULES = 12;
+    public static final int SLOT_RELOCATE = 13;
     public static final int SLOT_DELETE = 14;
 
     private final NetroPlugin plugin;
@@ -37,6 +38,7 @@ public class StationNodeOptionsHolder implements InventoryHolder {
         this.inventory = Bukkit.createInventory(this, SIZE, this.nodeDisplayName + " — Options");
         inventory.setItem(SLOT_BACK, newItem(Material.ARROW, "Back", List.of("Return to station list.")));
         inventory.setItem(SLOT_OPEN_RULES, newItem(Material.BOOK, "Open rules", List.of("Open rules for this " + contextType + ".")));
+        inventory.setItem(SLOT_RELOCATE, newItem(Material.ENDER_PEARL, "Relocate", List.of("Move a detector or controller to a new spot. Click the block to move to (placed above).")));
         inventory.setItem(SLOT_DELETE, newItem(Material.RED_WOOL, "Delete", List.of("Delete this " + contextType + ". Requires confirmation.")));
     }
 
@@ -60,6 +62,7 @@ public class StationNodeOptionsHolder implements InventoryHolder {
 
     public boolean isBackSlot(int slot) { return slot == SLOT_BACK; }
     public boolean isOpenRulesSlot(int slot) { return slot == SLOT_OPEN_RULES; }
+    public boolean isRelocateSlot(int slot) { return slot == SLOT_RELOCATE; }
     public boolean isDeleteSlot(int slot) { return slot == SLOT_DELETE; }
 
     @Override

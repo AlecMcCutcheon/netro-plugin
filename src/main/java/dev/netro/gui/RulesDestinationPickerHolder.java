@@ -3,6 +3,7 @@ package dev.netro.gui;
 import dev.netro.NetroPlugin;
 import dev.netro.database.StationRepository;
 import dev.netro.database.TransferNodeRepository;
+import dev.netro.model.Rule;
 import dev.netro.model.Station;
 import dev.netro.model.TransferNode;
 import org.bukkit.Bukkit;
@@ -44,6 +45,8 @@ public class RulesDestinationPickerHolder implements InventoryHolder {
     private final String pickerMode;
     /** When pickerMode is SET_DESTINATION, the hop that when blocked triggers this rule. */
     private final String blockedHopId;
+    /** When non-null, we are editing this rule; picking a destination opens Step 3 with editRule instead of creating. */
+    private final Rule editRule;
     private final Inventory inventory;
     /** Slot index -> destination_id string (for routing/destination matching). */
     private final List<DestinationOption> options = new ArrayList<>();
@@ -56,6 +59,12 @@ public class RulesDestinationPickerHolder implements InventoryHolder {
     public RulesDestinationPickerHolder(NetroPlugin plugin, String contextType, String contextId, String contextSide,
                                        String rulesTitle, String triggerType, boolean destinationPositive,
                                        String pickerMode, String blockedHopId) {
+        this(plugin, contextType, contextId, contextSide, rulesTitle, triggerType, destinationPositive, pickerMode, blockedHopId, null);
+    }
+
+    public RulesDestinationPickerHolder(NetroPlugin plugin, String contextType, String contextId, String contextSide,
+                                       String rulesTitle, String triggerType, boolean destinationPositive,
+                                       String pickerMode, String blockedHopId, Rule editRule) {
         this.plugin = plugin;
         this.contextType = contextType;
         this.contextId = contextId;
@@ -65,6 +74,7 @@ public class RulesDestinationPickerHolder implements InventoryHolder {
         this.destinationPositive = destinationPositive;
         this.pickerMode = pickerMode;
         this.blockedHopId = blockedHopId;
+        this.editRule = editRule;
         String title = titleForMode();
         this.inventory = Bukkit.createInventory(this, SIZE, title);
         fillDestinations();
@@ -78,7 +88,7 @@ public class RulesDestinationPickerHolder implements InventoryHolder {
 
     private void fillDestinations() {
         inventory.clear();
-        inventory.setItem(SLOT_BACK, newItem(Material.ARROW, "Back", List.of("Return to destination type.")));
+        inventory.setItem(SLOT_BACK, newItem(Material.ARROW, "Back", List.of("Back.")));
 
         StationRepository stationRepo = new StationRepository(plugin.getDatabase());
         TransferNodeRepository nodeRepo = new TransferNodeRepository(plugin.getDatabase());
@@ -91,9 +101,9 @@ public class RulesDestinationPickerHolder implements InventoryHolder {
                     if (slot >= SIZE) break;
                     if (node.getTerminalIndex() == null) continue;
                     String destId = stationAddress + "." + node.getTerminalIndex();
-                    String display = station.getName() + ":" + node.getTerminalIndex() + " (" + node.getName() + ")";
+                    String display = station.getName() + ":" + node.getName();
                     options.add(new DestinationOption(slot, destId, display));
-                    inventory.setItem(slot, newItem(Material.MINECART, display, List.of("When this terminal is blocked")));
+                    inventory.setItem(slot, newItem(Material.MINECART, display, List.of("Terminal blocked.")));
                     slot++;
                 }
             }
@@ -117,13 +127,13 @@ public class RulesDestinationPickerHolder implements InventoryHolder {
                 String display;
                 if (node.isTerminal() && node.getTerminalIndex() != null) {
                     destId = stationAddress + "." + node.getTerminalIndex();
-                    display = station.getName() + ":" + node.getTerminalIndex() + " (" + node.getName() + ")";
+                    display = station.getName() + ":" + node.getName();
                 } else {
                     destId = station.getName() + ":" + node.getName();
                     display = station.getName() + ":" + node.getName();
                 }
                 options.add(new DestinationOption(slot, destId, display));
-                inventory.setItem(slot, newItem(Material.MINECART, display, List.of("Destination: " + destId)));
+                inventory.setItem(slot, newItem(Material.MINECART, display, List.of("Destination.")));
                 slot++;
             }
             return;
@@ -150,6 +160,7 @@ public class RulesDestinationPickerHolder implements InventoryHolder {
     public boolean isDestinationPositive() { return destinationPositive; }
     public String getPickerMode() { return pickerMode; }
     public String getBlockedHopId() { return blockedHopId; }
+    public Rule getEditRule() { return editRule; }
 
     public String getDestinationIdAtSlot(int slot) {
         for (DestinationOption o : options) {

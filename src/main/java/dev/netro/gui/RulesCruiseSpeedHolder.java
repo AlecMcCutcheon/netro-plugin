@@ -9,6 +9,8 @@ import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 
+import dev.netro.model.Rule;
+
 import java.util.List;
 
 /**
@@ -39,6 +41,7 @@ public class RulesCruiseSpeedHolder implements InventoryHolder {
     private final String triggerType;
     private final boolean destinationPositive;
     private final String destinationId;
+    private final Rule editRule;
     private final Inventory inventory;
     /** 0-9 or null if not selected. */
     private Integer firstDigit = null;
@@ -46,6 +49,11 @@ public class RulesCruiseSpeedHolder implements InventoryHolder {
 
     public RulesCruiseSpeedHolder(NetroPlugin plugin, String contextType, String contextId, String contextSide,
                                   String rulesTitle, String triggerType, boolean destinationPositive, String destinationId) {
+        this(plugin, contextType, contextId, contextSide, rulesTitle, triggerType, destinationPositive, destinationId, null);
+    }
+
+    public RulesCruiseSpeedHolder(NetroPlugin plugin, String contextType, String contextId, String contextSide,
+                                  String rulesTitle, String triggerType, boolean destinationPositive, String destinationId, Rule editRule) {
         this.plugin = plugin;
         this.contextType = contextType;
         this.contextId = contextId;
@@ -54,14 +62,29 @@ public class RulesCruiseSpeedHolder implements InventoryHolder {
         this.triggerType = triggerType;
         this.destinationPositive = destinationPositive;
         this.destinationId = destinationId;
-        this.inventory = Bukkit.createInventory(this, SIZE, "Rule: Cruise speed");
+        this.editRule = editRule;
+        this.inventory = Bukkit.createInventory(this, SIZE, editRule != null ? "Rule: Cruise speed (editing)" : "Rule: Cruise speed");
+        if (editRule != null && editRule.getActionData() != null) {
+            String data = editRule.getActionData();
+            int dot = data.indexOf('.');
+            if (dot >= 0 && dot + 1 < data.length()) {
+                try {
+                    int f = Integer.parseInt(data.substring(0, dot).trim());
+                    int s = Integer.parseInt(data.substring(dot + 1).trim());
+                    if (f >= 0 && f <= 9 && s >= 0 && s <= 9) {
+                        firstDigit = f;
+                        secondDigit = s;
+                    }
+                } catch (NumberFormatException ignored) { }
+            }
+        }
         fillLayout();
     }
 
     private void fillLayout() {
         inventory.clear();
-        inventory.setItem(SLOT_LABEL_WHOLE, newItem(Material.OAK_SIGN, "Whole number", List.of("First digit (0–9).", "Speed = whole.tenths")));
-        inventory.setItem(SLOT_LABEL_TENTHS, newItem(Material.CLOCK, "Tenths", List.of("Decimal digit (0–9).", "Speed = whole.tenths")));
+        inventory.setItem(SLOT_LABEL_WHOLE, newItem(Material.OAK_SIGN, "Whole number", List.of("First digit 0–9.")));
+        inventory.setItem(SLOT_LABEL_TENTHS, newItem(Material.CLOCK, "Tenths", List.of("Second digit 0–9.")));
         for (int i = 0; i < FIRST_NUMPAD_SLOTS.length; i++) {
             int slot = FIRST_NUMPAD_SLOTS[i];
             int digit = FIRST_NUMPAD_DIGITS[i];
@@ -72,15 +95,17 @@ public class RulesCruiseSpeedHolder implements InventoryHolder {
             int digit = SECOND_NUMPAD_DIGITS[i];
             inventory.setItem(slot, digitItem(digit, secondDigit != null && secondDigit == digit));
         }
-        inventory.setItem(SLOT_CANCEL, newItem(Material.RED_WOOL, "Cancel", List.of("Return to action choice.")));
-        inventory.setItem(SLOT_CONFIRM, newItem(Material.LIME_WOOL, "Confirm", List.of("Create rule with speed " + formatSpeed() + ".")));
+        inventory.setItem(SLOT_CANCEL, newItem(Material.RED_WOOL, "Cancel", List.of("Back.")));
+        String confirmLore = editRule != null ? "Update rule with speed " + formatSpeed() + "." : "Create rule with speed " + formatSpeed() + ".";
+        inventory.setItem(SLOT_CONFIRM, newItem(Material.LIME_WOOL, "Confirm", List.of(confirmLore)));
     }
 
     private ItemStack digitItem(int digit, boolean selected) {
         ItemStack stack = new ItemStack(Material.PAPER);
         ItemMeta meta = stack.getItemMeta();
         if (meta != null) {
-            meta.setDisplayName(String.valueOf(digit));
+            String name = String.valueOf(digit);
+            meta.setDisplayName(selected ? "§l" + name : name);
             if (selected) meta.addEnchant(Enchantment.UNBREAKING, 1, true);
         }
         stack.setItemMeta(meta);
@@ -161,6 +186,7 @@ public class RulesCruiseSpeedHolder implements InventoryHolder {
     public String getTriggerType() { return triggerType; }
     public boolean isDestinationPositive() { return destinationPositive; }
     public String getDestinationId() { return destinationId; }
+    public Rule getEditRule() { return editRule; }
 
     @Override
     public Inventory getInventory() { return inventory; }
