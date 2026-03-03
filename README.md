@@ -1,4 +1,4 @@
-# Netro
+# Netro — Rail Network Plugin
 
 **Netro** is a Minecraft (Spigot/Paper 1.21) plugin for **rail networks**: stations, transfer nodes, terminals, and automated cart routing. Build complex rail systems with sign-based setup, destination-based pathfinding, and rule-driven behavior (speed, switches, release mechanisms).
 
