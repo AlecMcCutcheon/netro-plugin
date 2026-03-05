@@ -1,5 +1,8 @@
 # When you push a version tag (v1.0.0, v1.0.1, etc.), build and publish a GitHub Release
-# with the JAR attached. Update pom.xml <version> then: git tag v1.0.0 && git push origin v1.0.0
+# with the JAR attached.
+# Release checklist: set same version in plugin.yml, RELEASE_INFO.md, and pom.xml; then:
+#   git add -A && git commit -m "Release X.Y.Z: ..." && git push origin main
+#   git tag -a vX.Y.Z -m "Release X.Y.Z" && git push origin vX.Y.Z
 name: Release
 
 on:
