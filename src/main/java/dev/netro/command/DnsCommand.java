@@ -6,6 +6,7 @@ import dev.netro.database.TransferNodeRepository;
 import dev.netro.model.Station;
 import dev.netro.model.TransferNode;
 import dev.netro.util.AddressHelper;
+import dev.netro.util.DimensionHelper;
 import dev.netro.util.DestinationResolver;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
@@ -55,40 +56,55 @@ public class DnsCommand implements CommandExecutor, TabCompleter {
             }
             Player p = (Player) sender;
             int x = p.getLocation().getBlockX();
-            String prefix = AddressHelper.mainnetFromX(x) + "." + AddressHelper.clusterFromX(x);
+            int z = p.getLocation().getBlockZ();
+            int dimension = DimensionHelper.dimensionFromEnvironment(p.getWorld().getEnvironment());
+            String prefix = AddressHelper.clusterPrefix2D(dimension, x, z);
             List<Station> stations = stationRepo.findByAddressPrefix(prefix);
-            stations = stations.stream().filter(s -> isFourPartAddress(s.getAddress())).toList();
+            stations = stations.stream().filter(s -> isStationAddress(s.getAddress())).toList();
             sendDnsHeader(sender, "Cluster " + prefix);
             sendStationList(sender, stations, true);
             return true;
         }
 
         if (args.length >= 3 && "list".equals(args[0].toLowerCase()) && "main".equals(args[1].toLowerCase())) {
-            String mainArg = args[2];
-            int mainnet;
-            try {
-                mainnet = Integer.parseInt(mainArg);
-            } catch (NumberFormatException e) {
-                sender.sendMessage("Usage: /" + label + " list main <number>");
+            String mainnetArg = args[2].strip();
+            int dimension = sender instanceof Player p
+                ? DimensionHelper.dimensionFromEnvironment(p.getWorld().getEnvironment())
+                : DimensionHelper.DIMENSION_OVERWORLD;
+            Integer mX = null;
+            Integer mZ = null;
+            if (mainnetArg.contains(":") && mainnetArg.split(":", -1).length >= 2) {
+                String[] mxz = mainnetArg.split(":", -1);
+                mX = AddressHelper.parseMainnetCardinal(mxz[0].strip());
+                mZ = AddressHelper.parseMainnetCardinal(mxz[1].strip());
+            } else {
+                int[] parsed = AddressHelper.parseMainnetToken(mainnetArg);
+                if (parsed != null) { mX = parsed[0]; mZ = parsed[1]; }
+            }
+            if (mX == null || mZ == null) {
+                sender.sendMessage("Usage: /" + label + " list main <mainnetLabel> (e.g. E2N3 or E2:N3)");
                 return true;
             }
-            List<Station> stations = stationRepo.findByAddressPrefix(String.valueOf(mainnet));
-            stations = stations.stream().filter(s -> isFourPartAddress(s.getAddress())).toList();
-            sendDnsHeader(sender, "MainNet " + mainnet);
+            String prefix = AddressHelper.mainnetPrefix2D(dimension, mX, mZ);
+            List<Station> stations = stationRepo.findByAddressPrefix(prefix);
+            stations = stations.stream().filter(s -> isStationAddress(s.getAddress())).toList();
+            sendDnsHeader(sender, "MainNet " + AddressHelper.mainnetLabel(mX, mZ));
             sendStationList(sender, stations, true);
             return true;
         }
 
         if ("list".equals(sub)) {
             if (!(sender instanceof Player)) {
-                sender.sendMessage("Use /" + label + " list as a player to see your localnet, or /" + label + " list main <n> or /" + label + " <address|name>");
+                sender.sendMessage("Use /" + label + " list as a player to see your localnet, or /" + label + " list main <E2N3> or /" + label + " <address|name>");
                 return true;
             }
             Player p = (Player) sender;
             int x = p.getLocation().getBlockX();
-            String prefix = AddressHelper.prefixFromX(x);
+            int z = p.getLocation().getBlockZ();
+            int dimension = DimensionHelper.dimensionFromEnvironment(p.getWorld().getEnvironment());
+            String prefix = AddressHelper.regionPrefix2D(dimension, x, z);
             List<Station> stations = stationRepo.findByAddressPrefix(prefix);
-            stations = stations.stream().filter(s -> isFourPartAddress(s.getAddress())).toList();
+            stations = stations.stream().filter(s -> isStationAddress(s.getAddress())).toList();
             sendDnsHeader(sender, "LocalNet " + prefix);
             sendStationList(sender, stations, true);
             return true;
@@ -111,7 +127,7 @@ public class DnsCommand implements CommandExecutor, TabCompleter {
             String address = addressOpt.get();
             Optional<Station> stOpt = stationRepo.findByAddress(address)
                 .or(() -> stationRepo.findAll().stream()
-                    .filter(s -> address.equals(s.getAddress()) || address.startsWith(s.getAddress() + "."))
+                    .filter(s -> address.equals(s.getAddress()) || address.startsWith(s.getAddress() + ".") || address.startsWith(s.getAddress() + ":"))
                     .findFirst());
             if (stOpt.isEmpty()) {
                 sender.sendMessage("Resolved to " + address + " (station not in DB).");
@@ -119,8 +135,11 @@ public class DnsCommand implements CommandExecutor, TabCompleter {
             }
             Station st = stOpt.get();
             String displayLabel = st.getName();
-            if (address.startsWith(st.getAddress() + ".") && address.substring(st.getAddress().length() + 1).matches("[0-9]+")) {
-                displayLabel = st.getName() + " terminal #" + address.substring(st.getAddress().length() + 1);
+            if ((address.startsWith(st.getAddress() + ".") || address.startsWith(st.getAddress() + ":")) && address.length() > st.getAddress().length() + 1) {
+                String suffix = address.substring(st.getAddress().length() + 1);
+                if (suffix.matches("[0-9]+")) {
+                    displayLabel = st.getName() + " terminal #" + suffix;
+                }
             }
             String setDestCmd = "/netro setdestination " + address;
             plugin.sendMessage(sender, Component.text(displayLabel + " ", NamedTextColor.GREEN)
@@ -155,7 +174,7 @@ public class DnsCommand implements CommandExecutor, TabCompleter {
                 for (int i = 0; i < terms.size(); i++) {
                     TransferNode tn = terms.get(i);
                     if (tn.getTerminalIndex() != null) {
-                        String termAddr = st.getAddress() + "." + tn.getTerminalIndex();
+                        String termAddr = dev.netro.util.AddressHelper.terminalAddress(st.getAddress(), tn.getTerminalIndex());
                         String setDestTerm = "/netro setdestination " + termAddr;
                         plugin.sendMessage(sender, Component.text("        └ " + tn.getName() + "  ").color(NamedTextColor.DARK_GRAY)
                             .append(Component.text(termAddr).clickEvent(ClickEvent.runCommand(setDestTerm)))
@@ -184,10 +203,10 @@ public class DnsCommand implements CommandExecutor, TabCompleter {
         return List.of();
     }
 
-    private static boolean isFourPartAddress(String addr) {
+    /** True if address is a station address (6-part), not a terminal (7-part). */
+    private static boolean isStationAddress(String addr) {
         if (addr == null) return false;
-        String[] parts = addr.split("\\.");
-        return parts.length == 4;
+        return AddressHelper.isNewFormatStationAddress(addr);
     }
 
     private static String joinArgs(String[] args, int from) {

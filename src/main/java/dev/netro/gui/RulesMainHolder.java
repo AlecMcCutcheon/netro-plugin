@@ -7,6 +7,7 @@ import dev.netro.database.TransferNodeRepository;
 import dev.netro.model.Rule;
 import dev.netro.model.Station;
 import dev.netro.model.TransferNode;
+import dev.netro.util.AddressHelper;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.inventory.Inventory;
@@ -33,6 +34,8 @@ public class RulesMainHolder implements InventoryHolder {
     /** Pair transfer node (transfer context only). */
     public static final int SLOT_ACTION = 46;
     public static final int SLOT_CREATE = 49;
+    /** Cached routes from this station (opens Routes menu). */
+    public static final int SLOT_ROUTES = 50;
     /** Relocate a detector or controller for this node (next to Close for symmetry). */
     public static final int SLOT_RELOCATE = 52;
     public static final int SLOT_CLOSE = 53;
@@ -79,6 +82,7 @@ public class RulesMainHolder implements InventoryHolder {
         }
         inventory.setItem(SLOT_CREATE, newItem(Material.WRITABLE_BOOK, "Create rule", List.of("Add rule.")));
         if (contextId != null) {
+            inventory.setItem(SLOT_ROUTES, newItem(Material.MINECART, "Routes", List.of("Cached routes from this station.")));
             inventory.setItem(SLOT_RELOCATE, newItem(Material.ENDER_PEARL, "Relocate", List.of("Move a detector or controller to a new spot.")));
         }
         inventory.setItem(SLOT_CLOSE, newItem(Material.ARROW, "Close", List.of("Close.")));
@@ -110,26 +114,53 @@ public class RulesMainHolder implements InventoryHolder {
         return stationRepo.findById(n.getStationId()).map(st -> st.getName() + ":" + n.getName()).orElse(n.getName());
     }
 
-    /** Resolve destination id to a display name (StationName:NodeName). Terminals are stored as address.terminalIndex; resolve to names. */
+    /** Resolve destination id to a display name (station name or StationName:NodeName). Never show raw address in GUI/chat; addresses only in DNS. */
     public static String formatDestinationId(String destId, StationRepository stationRepo, TransferNodeRepository nodeRepo) {
         if (destId == null || destId.isEmpty()) return "?";
+        Optional<AddressHelper.ParsedDestination> destParsed = AddressHelper.parseDestination(destId);
+        if (destParsed.isPresent()) {
+            Optional<Station> stOpt = stationRepo.findByAddress(destParsed.get().stationAddress());
+            if (stOpt.isPresent()) {
+                Station st = stOpt.get();
+                Integer termIdx = destParsed.get().terminalIndex();
+                if (termIdx != null) {
+                    Optional<TransferNode> nodeOpt = nodeRepo.findTerminalByIndex(st.getId(), termIdx);
+                    if (nodeOpt.isPresent()) return st.getName() + ":" + nodeOpt.get().getName();
+                }
+                return st.getName();
+            }
+        }
         int lastDot = destId.lastIndexOf('.');
         if (lastDot > 0 && lastDot < destId.length() - 1) {
             String address = destId.substring(0, lastDot);
             String indexStr = destId.substring(lastDot + 1);
             try {
                 int terminalIndex = Integer.parseInt(indexStr);
-                Optional<Station> stOpt = stationRepo.findByAddress(address);
-                if (stOpt.isPresent()) {
-                    Station st = stOpt.get();
-                    for (TransferNode node : nodeRepo.findTerminals(st.getId())) {
+                Optional<Station> stationByAddress = stationRepo.findByAddress(address);
+                if (stationByAddress.isPresent()) {
+                    Station station = stationByAddress.get();
+                    for (TransferNode node : nodeRepo.findTerminals(station.getId())) {
                         if (node.getTerminalIndex() != null && node.getTerminalIndex() == terminalIndex) {
-                            return st.getName() + ":" + node.getName();
+                            return station.getName() + ":" + node.getName();
                         }
                     }
                 }
             } catch (NumberFormatException ignored) { }
         }
+        int colon = destId.indexOf(':');
+        if (colon > 0 && colon < destId.length() - 1) {
+            String stationName = destId.substring(0, colon).strip();
+            String nodeName = destId.substring(colon + 1).strip();
+            if (!nodeName.isEmpty()) {
+                Optional<Station> stOpt = stationRepo.findByNameIgnoreCase(stationName).or(() -> stationRepo.findByAddress(stationName));
+                if (stOpt.isPresent()) {
+                    Optional<TransferNode> nodeOpt = nodeRepo.findByNameAtStation(stOpt.get().getId(), nodeName);
+                    if (nodeOpt.isPresent()) return stOpt.get().getName() + ":" + nodeOpt.get().getName();
+                }
+            }
+        }
+        Optional<Station> stOpt = stationRepo.findByAddress(destId);
+        if (stOpt.isPresent()) return stOpt.get().getName();
         return destId;
     }
 
@@ -158,6 +189,12 @@ public class RulesMainHolder implements InventoryHolder {
             lore.add("When cart " + cond);
             if (Rule.ACTION_SET_CRUISE_SPEED.equals(r.getActionType())) {
                 lore.add("Action: set cruise speed to " + (r.getActionData() != null ? r.getActionData() : "?"));
+            } else if (Rule.ACTION_SET_RAIL_STATE.equals(r.getActionType()) && r.getActionData() != null && !r.getActionData().isEmpty()) {
+                java.util.List<String> entries = dev.netro.util.RailStateListEncoder.parseEntries(r.getActionData());
+                if (entries.size() == 1)
+                    lore.add("Action: set rail " + dev.netro.util.RailStateListEncoder.formatEntryDisplay(entries.get(0)));
+                else
+                    lore.add("Action: set " + entries.size() + " rails");
             } else {
                 lore.add("Action: " + r.getActionType());
                 if (r.getActionData() != null && !r.getActionData().isEmpty()) lore.add(r.getActionData());
@@ -205,6 +242,7 @@ public class RulesMainHolder implements InventoryHolder {
     public boolean isSegmentSlot(int slot) { return false; }
 
     public boolean isCreateSlot(int slot) { return slot == SLOT_CREATE; }
+    public boolean isRoutesSlot(int slot) { return slot == SLOT_ROUTES; }
     public boolean isCloseSlot(int slot) { return slot == SLOT_CLOSE; }
 
     /** Refresh rules from DB and redraw (e.g. after create/delete). */

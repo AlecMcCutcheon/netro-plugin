@@ -1,11 +1,13 @@
 -- Netro Schema v2
 
 -- ── Stations ──────────────────────────────────────────────────────────────────
+-- dimension: 0 = Overworld, 1 = Nether (first tier in address, e.g. 0.2.4.7.3)
 CREATE TABLE IF NOT EXISTS stations (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL UNIQUE,
     address     TEXT NOT NULL UNIQUE,
     world       TEXT NOT NULL,
+    dimension   INTEGER NOT NULL DEFAULT 0,
     sign_x      INTEGER NOT NULL,
     sign_y      INTEGER NOT NULL,
     sign_z      INTEGER NOT NULL,
@@ -29,6 +31,20 @@ CREATE TABLE IF NOT EXISTS transfer_nodes (
     UNIQUE(station_id, name)
 );
 CREATE INDEX IF NOT EXISTS idx_tn_station ON transfer_nodes(station_id);
+
+-- Portal link blocks per transfer node. side: 0 = same dimension as node, 1 = other dimension (e.g. nether side when node is OW).
+-- For OW–OW pairs we need both sides to compute nether segment (portal A nether → portal B nether). If any block is broken, that side is cleared.
+CREATE TABLE IF NOT EXISTS transfer_node_portal_blocks (
+    node_id     TEXT NOT NULL REFERENCES transfer_nodes(id) ON DELETE CASCADE,
+    side        INTEGER NOT NULL DEFAULT 0,
+    world       TEXT NOT NULL,
+    x           INTEGER NOT NULL,
+    y           INTEGER NOT NULL,
+    z           INTEGER NOT NULL,
+    PRIMARY KEY (node_id, side, world, x, y, z)
+);
+CREATE INDEX IF NOT EXISTS idx_tn_portal_blocks_node ON transfer_node_portal_blocks(node_id);
+CREATE INDEX IF NOT EXISTS idx_tn_portal_blocks_block ON transfer_node_portal_blocks(world, x, y, z);
 
 -- Routing: first-hop is computed on the fly via shortest path (stations + paired transfer nodes); no routing_entries table.
 
@@ -114,4 +130,13 @@ CREATE TABLE IF NOT EXISTS cart_held_counts (
     updated_at          INTEGER NOT NULL
 );
 
--- Routing decisions are not stored; use routing debug (console) for debugging.
+-- Cached routes: from_station_id → dest_station_id → first_hop_node_id, cost. Used to avoid recomputing Dijkstra when unchanged.
+CREATE TABLE IF NOT EXISTS route_cache (
+    from_station_id   TEXT NOT NULL REFERENCES stations(id) ON DELETE CASCADE,
+    dest_station_id   TEXT NOT NULL REFERENCES stations(id) ON DELETE CASCADE,
+    first_hop_node_id TEXT NOT NULL REFERENCES transfer_nodes(id) ON DELETE CASCADE,
+    cost              INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL,
+    PRIMARY KEY (from_station_id, dest_station_id)
+);
+CREATE INDEX IF NOT EXISTS idx_route_cache_from ON route_cache(from_station_id);

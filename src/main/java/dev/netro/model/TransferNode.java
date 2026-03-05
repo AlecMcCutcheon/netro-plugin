@@ -1,5 +1,7 @@
 package dev.netro.model;
 
+import dev.netro.util.AddressHelper;
+
 /**
  * A transfer node lives at one station and represents one connection endpoint.
  * Two paired transfer nodes form a complete bidirectional rail connection.
@@ -76,11 +78,11 @@ public class TransferNode {
     public boolean isPaired() { return pairedNodeId != null; }
 
     /**
-     * Full terminal address for this node: stationAddress + "." + terminalIndex.
+     * Full terminal address for this node (colon format, 2-digit terminal).
      * Returns null if not a terminal or index not yet assigned.
      */
     public String terminalAddress(String stationAddress) {
         if (!terminal || terminalIndex == null) return null;
-        return stationAddress + "." + terminalIndex;
+        return AddressHelper.terminalAddress(stationAddress, terminalIndex);
     }
 }

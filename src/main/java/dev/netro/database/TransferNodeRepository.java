@@ -221,17 +221,21 @@ public class TransferNodeRepository {
         });
     }
 
-    private static final int NODE_CAPACITY = 4;
-
-    /** Free slots at node (capacity - held count). Uses cart_held_counts. */
+    /**
+     * Free slots at node. Terminals: 1 if no cart held, 0 if one held (detection-based).
+     * Transfer nodes: we do not track occupancy; always return 1 so dispatch is not blocked by "full".
+     */
     public int countFreeSlots(String nodeId) {
         return database.withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT COALESCE(held_count, 0) FROM cart_held_counts WHERE node_id = ?")) {
+                "SELECT n.is_terminal, COALESCE(c.held_count, 0) FROM transfer_nodes n LEFT JOIN cart_held_counts c ON c.node_id = n.id WHERE n.id = ?")) {
                 ps.setString(1, nodeId);
                 try (ResultSet rs = ps.executeQuery()) {
-                    int held = rs.next() ? rs.getInt(1) : 0;
-                    return Math.max(0, NODE_CAPACITY - held);
+                    if (!rs.next()) return 0;
+                    boolean terminal = rs.getInt(1) != 0;
+                    if (!terminal) return 1; // transfer nodes: no occupancy tracking
+                    int held = rs.getInt(2);
+                    return held == 0 ? 1 : 0;
                 }
             }
         });

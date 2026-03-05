@@ -19,7 +19,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
 
 /**
  * Keeps chunks loaded for detectors (transfer, terminal) and for "managed" carts (carts in cart_segments).
@@ -104,20 +103,30 @@ public class ChunkLoadService {
                 removeChunk(worldName, cx + dx, cz + dz);
     }
 
-    public void startCartChunkTask() {
+    /** Starts the cart chunk task only if there are carts in the DB. Call on plugin enable and when a cart is first added. */
+    public void ensureCartTaskRunning() {
         if (addTicketMethod == null || cartTask != null) return;
+        if (cartRepo.listAllCartUuids().isEmpty()) return;
         cartTask = plugin.getServer().getScheduler().runTaskTimer(plugin, this::tickCartChunks, CART_CHUNK_INTERVAL_TICKS, CART_CHUNK_INTERVAL_TICKS);
     }
 
     private void tickCartChunks() {
         List<String> cartUuids = cartRepo.listAllCartUuids();
-        Set<String> current = new HashSet<>(cartUuids);
-        for (String cartUuid : List.copyOf(cartChunks.keySet())) {
-            if (!current.contains(cartUuid))
-                removeChunksForCart(cartUuid);
+        if (cartUuids.isEmpty()) {
+            if (cartTask != null) {
+                cartTask.cancel();
+                cartTask = null;
+            }
+            return;
         }
+        Set<String> current = new HashSet<>(cartUuids);
+        for (String key : List.copyOf(cartChunks.keySet())) {
+            if (!current.contains(key))
+                removeChunksForCart(key);
+        }
+        Map<String, Minecart> uuidToCart = collectAllMinecartsByUuid();
         for (String cartUuid : cartUuids) {
-            Minecart cart = findMinecartByUuid(cartUuid);
+            Minecart cart = uuidToCart.get(cartUuid);
             if (cart == null || !cart.isValid()) {
                 removeChunksForCart(cartUuid);
                 continue;
@@ -190,18 +199,14 @@ public class ChunkLoadService {
         }
     }
 
-    private static Minecart findMinecartByUuid(String uuidStr) {
-        UUID uuid;
-        try {
-            uuid = UUID.fromString(uuidStr);
-        } catch (IllegalArgumentException e) {
-            return null;
-        }
+    /** One pass over all worlds and minecarts; use for multiple lookups in the same tick. */
+    private static Map<String, Minecart> collectAllMinecartsByUuid() {
+        Map<String, Minecart> out = new HashMap<>();
         for (org.bukkit.World w : org.bukkit.Bukkit.getWorlds()) {
             for (Minecart cart : w.getEntitiesByClass(Minecart.class)) {
-                if (cart.getUniqueId().equals(uuid)) return cart;
+                out.put(cart.getUniqueId().toString(), cart);
             }
         }
-        return null;
+        return out;
     }
 }

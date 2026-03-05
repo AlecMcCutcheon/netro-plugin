@@ -2,8 +2,10 @@ package dev.netro.gui;
 
 import dev.netro.NetroPlugin;
 import dev.netro.database.RuleRepository;
+import dev.netro.database.StationRepository;
 import dev.netro.database.TransferNodeRepository;
 import dev.netro.model.Rule;
+import dev.netro.util.DestinationResolver;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.inventory.Inventory;
@@ -68,7 +70,10 @@ public class RulesCreateStep3Holder implements InventoryHolder {
         ItemStack sendOff = newItem(Material.GUNPOWDER, "Turn bulb OFF", List.of("Bulbs OFF."));
         ItemStack setRail;
         if (selectedRailStateActionData != null && !selectedRailStateActionData.isEmpty()) {
-            String display = formatRailStateDisplay(selectedRailStateActionData);
+            java.util.List<String> entries = dev.netro.util.RailStateListEncoder.parseEntries(selectedRailStateActionData);
+            String display = entries.size() == 1
+                ? dev.netro.util.RailStateListEncoder.formatEntryDisplay(entries.get(0))
+                : entries.size() + " rail(s) configured";
             setRail = newItem(Material.RAIL, "Set rail state", List.of("Chosen: " + display, "Save or click to change."));
             enchant(setRail);
         } else {
@@ -86,21 +91,10 @@ public class RulesCreateStep3Holder implements InventoryHolder {
         inventory.setItem(SLOT_SEND_OFF, sendOff);
         inventory.setItem(SLOT_SET_RAIL, setRail);
         inventory.setItem(SLOT_SET_CRUISE_SPEED, cruise);
-        inventory.setItem(SLOT_BACK, newItem(Material.ARROW, "Back", List.of("Back.")));
+        inventory.setItem(SLOT_BACK, newItem(Material.ARROW, "Back", List.of("Back (don't save).")));
         if (editRule != null || selectedRailStateActionData != null) {
-            inventory.setItem(SLOT_SAVE, newItem(Material.EMERALD, "Save and go back", List.of("Save & back.")));
+            inventory.setItem(SLOT_SAVE, newItem(Material.EMERALD, "Save and return to rules", List.of("Save rule and return to rules list.")));
         }
-    }
-
-    /** Format actionData "world,x,y,z,shape" as "x, y, z: Shape Name". */
-    private static String formatRailStateDisplay(String actionData) {
-        if (actionData == null) return "—";
-        String[] parts = actionData.split(",", -1);
-        if (parts.length >= 5) {
-            String shape = parts[4].trim().replace("_", " ");
-            return parts[1] + ", " + parts[2] + ", " + parts[3] + " → " + shape;
-        }
-        return actionData.replace("_", " ");
     }
 
     private static void enchant(ItemStack stack) {
@@ -143,11 +137,17 @@ public class RulesCreateStep3Holder implements InventoryHolder {
         return createRule(actionType, null);
     }
 
-    /** Create the rule with action and optional action_data (e.g. cruise speed "2.5"). */
+    /** Create the rule with action and optional action_data (e.g. cruise speed "2.5"). Destination stored in new-format when resolvable. */
     public int createRule(String actionType, String actionData) {
         var db = plugin.getDatabase();
-        RuleRepository repo = new RuleRepository(db, new TransferNodeRepository(db));
+        var stationRepo = new StationRepository(db);
+        var nodeRepo = new TransferNodeRepository(db);
+        RuleRepository repo = new RuleRepository(db, nodeRepo);
         int ruleIndex = repo.nextRuleIndex(contextType, contextId, contextSide);
+        String storedDestId = DestinationResolver.normalizeToNewFormatForStorage(stationRepo, nodeRepo, destinationId);
+        String storedActionData = Rule.ACTION_SET_DESTINATION.equals(actionType)
+            ? DestinationResolver.normalizeToNewFormatForStorage(stationRepo, nodeRepo, actionData)
+            : actionData;
         Rule rule = new Rule(
             UUID.randomUUID().toString(),
             contextType,
@@ -156,9 +156,9 @@ public class RulesCreateStep3Holder implements InventoryHolder {
             ruleIndex,
             triggerType,
             destinationPositive,
-            destinationId,
+            storedDestId != null ? storedDestId : destinationId,
             actionType,
-            actionData,
+            storedActionData != null ? storedActionData : actionData,
             System.currentTimeMillis()
         );
         repo.insert(rule);

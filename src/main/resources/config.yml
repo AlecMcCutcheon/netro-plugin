@@ -4,4 +4,7 @@
 # Debug: detector and routing logs to console (direction, role, next-hop finalDest/localDest, block reasons)
 debug: false
 
+# Route cache TTL in Minecraft world time: value in real-time milliseconds is converted to world ticks (20 ticks/sec). Cache expires after that much in-game time, so it does not expire while the server is off. 0 = no expiry. Effective TTL has per-pair jitter.
+route-cache-ttl-ms: 1800000
+
 # Database is stored in plugins/Netro/netro.db (SQLite)

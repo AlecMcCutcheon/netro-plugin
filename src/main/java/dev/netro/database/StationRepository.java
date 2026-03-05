@@ -11,6 +11,8 @@ import java.util.Optional;
 
 public class StationRepository {
 
+    private static final String STATION_COLUMNS = "id, name, address, world, dimension, sign_x, sign_y, sign_z, created_at";
+
     private final Database database;
 
     public StationRepository(Database database) {
@@ -20,7 +22,7 @@ public class StationRepository {
     public Optional<Station> findById(String id) {
         return database.withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT id, name, address, world, sign_x, sign_y, sign_z, created_at FROM stations WHERE id = ?")) {
+                "SELECT " + STATION_COLUMNS + " FROM stations WHERE id = ?")) {
                 ps.setString(1, id);
                 try (ResultSet rs = ps.executeQuery()) {
                     return rs.next() ? Optional.of(rowToStation(rs)) : Optional.empty();
@@ -29,10 +31,16 @@ public class StationRepository {
         });
     }
 
+    /** Find by exact address (2D format: 6-part station or 7-part terminal, colon-separated). */
     public Optional<Station> findByAddress(String address) {
+        if (address == null || address.isBlank()) return Optional.empty();
+        return findByAddressExact(address);
+    }
+
+    public Optional<Station> findByAddressExact(String address) {
         return database.withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT id, name, address, world, sign_x, sign_y, sign_z, created_at FROM stations WHERE address = ?")) {
+                "SELECT " + STATION_COLUMNS + " FROM stations WHERE address = ?")) {
                 ps.setString(1, address);
                 try (ResultSet rs = ps.executeQuery()) {
                     return rs.next() ? Optional.of(rowToStation(rs)) : Optional.empty();
@@ -44,7 +52,7 @@ public class StationRepository {
     public Optional<Station> findByName(String name) {
         return database.withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT id, name, address, world, sign_x, sign_y, sign_z, created_at FROM stations WHERE name = ?")) {
+                "SELECT " + STATION_COLUMNS + " FROM stations WHERE name = ?")) {
                 ps.setString(1, name);
                 try (ResultSet rs = ps.executeQuery()) {
                     return rs.next() ? Optional.of(rowToStation(rs)) : Optional.empty();
@@ -57,8 +65,22 @@ public class StationRepository {
     public Optional<Station> findByNameIgnoreCase(String name) {
         return database.withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT id, name, address, world, sign_x, sign_y, sign_z, created_at FROM stations WHERE LOWER(name) = LOWER(?)")) {
+                "SELECT " + STATION_COLUMNS + " FROM stations WHERE LOWER(name) = LOWER(?)")) {
                 ps.setString(1, name);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() ? Optional.of(rowToStation(rs)) : Optional.empty();
+                }
+            }
+        });
+    }
+
+    /** Case-insensitive lookup by station name in a specific dimension (0 = Overworld, 1 = Nether). Ensures terminals/nodes are only assigned to stations in the same dimension as the sign. */
+    public Optional<Station> findByNameIgnoreCaseAndDimension(String name, int dimension) {
+        return database.withConnection(conn -> {
+            try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT " + STATION_COLUMNS + " FROM stations WHERE LOWER(name) = LOWER(?) AND dimension = ?")) {
+                ps.setString(1, name);
+                ps.setInt(2, dimension);
                 try (ResultSet rs = ps.executeQuery()) {
                     return rs.next() ? Optional.of(rowToStation(rs)) : Optional.empty();
                 }
@@ -69,7 +91,7 @@ public class StationRepository {
     public List<Station> findAll() {
         return database.withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT id, name, address, world, sign_x, sign_y, sign_z, created_at FROM stations ORDER BY name")) {
+                "SELECT " + STATION_COLUMNS + " FROM stations ORDER BY name")) {
                 try (ResultSet rs = ps.executeQuery()) {
                     List<Station> list = new ArrayList<>();
                     while (rs.next()) list.add(rowToStation(rs));
@@ -79,12 +101,18 @@ public class StationRepository {
         });
     }
 
-    /** Stations whose address starts with prefix (e.g. "2.4.7" for localnet, "2.4" for cluster, "2" for mainnet). */
+    private static String addressPrefixLikePattern(String prefix) {
+        if (prefix == null) return "%";
+        if (prefix.contains(":")) return (prefix.endsWith(":") ? prefix : prefix + ":") + "%";
+        return (prefix.endsWith(".") ? prefix : prefix + ".") + "%";
+    }
+
+    /** Stations whose address starts with prefix (colon format OV:E2:N3:01:02 or legacy dot). */
     public List<Station> findByAddressPrefix(String prefix) {
-        String pattern = prefix.contains(".") ? prefix + ".%" : prefix + ".%";
+        String pattern = addressPrefixLikePattern(prefix);
         return database.withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT id, name, address, world, sign_x, sign_y, sign_z, created_at FROM stations WHERE address LIKE ? OR address = ? ORDER BY address")) {
+                "SELECT " + STATION_COLUMNS + " FROM stations WHERE address LIKE ? OR address = ? ORDER BY address")) {
                 ps.setString(1, pattern);
                 ps.setString(2, prefix);
                 try (ResultSet rs = ps.executeQuery()) {
@@ -100,7 +128,7 @@ public class StationRepository {
     public Optional<Station> findAtBlock(String world, int x, int y, int z) {
         return database.withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT id, name, address, world, sign_x, sign_y, sign_z, created_at FROM stations WHERE world = ? AND sign_x = ? AND sign_y = ? AND sign_z = ?")) {
+                "SELECT " + STATION_COLUMNS + " FROM stations WHERE world = ? AND sign_x = ? AND sign_y = ? AND sign_z = ?")) {
                 ps.setString(1, world);
                 ps.setInt(2, x);
                 ps.setInt(3, y);
@@ -112,14 +140,13 @@ public class StationRepository {
         });
     }
 
-    /** Count stations in the same localnet (same mainnet.cluster.localnet). Used to assign next station index. */
-    public int countStationsInLocalnet(String world, int mainnet, int cluster, int localnet) {
-        String prefix = mainnet + "." + cluster + "." + localnet + ".";
+    /** Count stations whose address starts with the given prefix (colon OV:E2:N3:01:02 or legacy with trailing dot). */
+    public int countStationsWithAddressPrefix(String addressPrefixWithTrailingDot) {
+        String pattern = addressPrefixLikePattern(addressPrefixWithTrailingDot);
         return database.withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT COUNT(*) AS c FROM stations WHERE world = ? AND address LIKE ?")) {
-                ps.setString(1, world);
-                ps.setString(2, prefix + "%");
+                "SELECT COUNT(*) AS c FROM stations WHERE address LIKE ?")) {
+                ps.setString(1, pattern);
                 ResultSet rs = ps.executeQuery();
                 int c = rs.next() ? rs.getInt("c") : 0;
                 rs.close();
@@ -141,15 +168,29 @@ public class StationRepository {
     public void insert(Station station) {
         database.withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(
-                "INSERT INTO stations (id, name, address, world, sign_x, sign_y, sign_z, created_at) VALUES (?,?,?,?,?,?,?,?)")) {
+                "INSERT INTO stations (id, name, address, world, dimension, sign_x, sign_y, sign_z, created_at) VALUES (?,?,?,?,?,?,?,?,?)")) {
                 ps.setString(1, station.getId());
                 ps.setString(2, station.getName());
                 ps.setString(3, station.getAddress());
                 ps.setString(4, station.getWorld());
-                ps.setInt(5, station.getSignX());
-                ps.setInt(6, station.getSignY());
-                ps.setInt(7, station.getSignZ());
-                ps.setLong(8, station.getCreatedAt());
+                ps.setInt(5, station.getDimension());
+                ps.setInt(6, station.getSignX());
+                ps.setInt(7, station.getSignY());
+                ps.setInt(8, station.getSignZ());
+                ps.setLong(9, station.getCreatedAt());
+                ps.executeUpdate();
+            }
+            return null;
+        });
+    }
+
+    public void updateAddressAndDimension(String stationId, String newAddress, int dimension) {
+        database.withConnection(conn -> {
+            try (PreparedStatement ps = conn.prepareStatement(
+                "UPDATE stations SET address = ?, dimension = ? WHERE id = ?")) {
+                ps.setString(1, newAddress);
+                ps.setInt(2, dimension);
+                ps.setString(3, stationId);
                 ps.executeUpdate();
             }
             return null;
@@ -162,6 +203,7 @@ public class StationRepository {
             rs.getString("name"),
             rs.getString("address"),
             rs.getString("world"),
+            rs.getInt("dimension"),
             rs.getInt("sign_x"),
             rs.getInt("sign_y"),
             rs.getInt("sign_z"),

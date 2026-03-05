@@ -4,6 +4,7 @@ import dev.netro.NetroPlugin;
 import dev.netro.database.StationRepository;
 import dev.netro.model.Station;
 import dev.netro.util.AddressHelper;
+import dev.netro.util.DimensionHelper;
 import dev.netro.util.SignColors;
 import dev.netro.util.SignTextHelper;
 import org.bukkit.block.Block;
@@ -55,20 +56,19 @@ public class StationListener implements Listener {
             return;
         }
 
-        int mainnet = AddressHelper.mainnetFromX(x);
-        int cluster = AddressHelper.clusterFromX(x);
-        int localnet = AddressHelper.localnetFromX(x);
-        int nextIndex = stationRepo.countStationsInLocalnet(worldName, mainnet, cluster, localnet) + 1;
-        String address = AddressHelper.stationAddress(x, nextIndex);
+        int dimension = DimensionHelper.dimensionFromEnvironment(block.getWorld().getEnvironment());
+        String regionPrefix = AddressHelper.regionPrefix2D(dimension, x, z);
+        int nextIndex = stationRepo.countStationsWithAddressPrefix(regionPrefix) + 1;
+        String address = AddressHelper.stationAddress(dimension, x, z, nextIndex);
 
         String id = UUID.randomUUID().toString();
         long now = System.currentTimeMillis();
-        Station station = new Station(id, name, address, worldName, x, y, z, now);
+        Station station = new Station(id, name, address, worldName, dimension, x, y, z, now);
         stationRepo.insert(station);
         if (plugin.getChunkLoadService() != null)
             plugin.getChunkLoadService().addChunksForBlock(station.getWorld(), station.getSignX(), station.getSignZ());
         SignColors.applyStationSign(event, name, address);
-        event.getPlayer().sendMessage("Station \"" + name + "\" created with address " + address + ".");
+        event.getPlayer().sendMessage("Station \"" + name + "\" created. Address is on the sign; use /netro dns for lookup.");
     }
 
     @EventHandler

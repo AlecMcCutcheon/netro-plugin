@@ -43,6 +43,10 @@ public class NetroPlugin extends JavaPlugin {
     private final Map<UUID, dev.netro.gui.PendingSetRailStateRule> pendingSetRailStateByPlayer = new ConcurrentHashMap<>();
     /** When non-null, player is in relocate flow: click source block then target block (placed above). */
     private final Map<UUID, dev.netro.gui.PendingRelocate> pendingRelocateByPlayer = new ConcurrentHashMap<>();
+    /** When non-null, player is selecting a nether portal for this transfer node; right-click portal to save. */
+    private final Map<UUID, dev.netro.gui.PendingPortalLink> pendingPortalLinkByPlayer = new ConcurrentHashMap<>();
+    /** After saving a portal link, reopen the Portal Link GUI for this node (keyed by player). */
+    private final Map<UUID, dev.netro.gui.ReopenPortalLinkGui> reopenPortalLinkAfterSaveByPlayer = new ConcurrentHashMap<>();
 
     @Override
     public void onEnable() {
@@ -52,8 +56,11 @@ public class NetroPlugin extends JavaPlugin {
 
         database = new Database(this);
         database.initialize();
+        new dev.netro.database.SchemaMigration(this, database).run();
 
         routingEngine = new RoutingEngine(this);
+        getServer().getScheduler().runTaskTimer(this, () -> routingEngine.processOneRouteRefresh(), 10L, 10L);
+        getServer().getScheduler().runTaskTimer(this, () -> routingEngine.scheduleRefreshForAllReachablePairs(), 20L * 60 * 30, 20L * 60 * 30);
         api = new NetroAPI(this);
 
         detectorRailHandler = new DetectorRailHandler(this);
@@ -65,9 +72,10 @@ public class NetroPlugin extends JavaPlugin {
         StationCommand stationCommand = new StationCommand(this);
         SetDestinationCommand setDestinationCommand = new SetDestinationCommand(this);
         DnsCommand dnsCommand = new DnsCommand(this);
+        WhereAmICommand whereAmICommand = new WhereAmICommand(this);
         CartControllerCommand cartControllerCommand = new CartControllerCommand(this);
         RailroadControllerCommand railroadControllerCommand = new RailroadControllerCommand(this);
-        NetroCommand netroCommand = new NetroCommand(this, stationCommand, setDestinationCommand, dnsCommand, cartControllerCommand, railroadControllerCommand);
+        NetroCommand netroCommand = new NetroCommand(this, stationCommand, setDestinationCommand, dnsCommand, whereAmICommand, cartControllerCommand, railroadControllerCommand);
         getCommand("netro").setExecutor(netroCommand);
         getCommand("netro").setTabCompleter(netroCommand);
 
@@ -80,8 +88,10 @@ public class NetroPlugin extends JavaPlugin {
         new dev.netro.gui.CartControllerBossBarUpdater(this).start();
         getServer().getPluginManager().registerEvents(new dev.netro.gui.RailroadControllerOpenListener(this), this);
         getServer().getPluginManager().registerEvents(new dev.netro.gui.RelocateBlockListener(this), this);
-        getServer().getPluginManager().registerEvents(new dev.netro.gui.RelocateBlockListener(this), this);
+        getServer().getPluginManager().registerEvents(new dev.netro.listener.PortalLinkBlockBreakListener(this), this);
         getServer().getScheduler().runTaskTimer(this, new dev.netro.gui.BlockHighlightTask(this), 5L, 5L);
+        getServer().getScheduler().runTaskTimer(this, new dev.netro.gui.RegionBoundaryHighlightTask(this), 20L, 15L);
+        new dev.netro.gui.RailroadControllerBossBarUpdater(this).start();
 
         scheduleStaleCartCleanup();
 
@@ -90,7 +100,7 @@ public class NetroPlugin extends JavaPlugin {
             new DetectorRepository(database),
             new CartRepository(database));
         chunkLoadService.loadAllFromDatabase();
-        chunkLoadService.startCartChunkTask();
+        chunkLoadService.ensureCartTaskRunning();
 
         getLogger().info("Netro enabled.");
     }
@@ -105,26 +115,21 @@ public class NetroPlugin extends JavaPlugin {
                 if (inDb.isEmpty()) return;
                 java.util.List<String> dbList = inDb;
                 getServer().getScheduler().runTask(this, () -> {
+                    java.util.Set<String> existing = new java.util.HashSet<>();
+                    for (org.bukkit.World world : getServer().getWorlds()) {
+                        for (org.bukkit.entity.Minecart cart : world.getEntitiesByClass(org.bukkit.entity.Minecart.class)) {
+                            existing.add(cart.getUniqueId().toString());
+                        }
+                    }
                     java.util.List<String> toRemove = new java.util.ArrayList<>();
                     for (String uuidStr : dbList) {
-                        java.util.UUID uuid;
                         try {
-                            uuid = java.util.UUID.fromString(uuidStr);
+                            java.util.UUID.fromString(uuidStr);
                         } catch (IllegalArgumentException e) {
                             toRemove.add(uuidStr);
                             continue;
                         }
-                        boolean found = false;
-                        for (org.bukkit.World world : getServer().getWorlds()) {
-                            for (org.bukkit.entity.Entity entity : world.getEntities()) {
-                                if (entity.getUniqueId().equals(uuid)) {
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if (found) break;
-                        }
-                        if (!found) toRemove.add(uuidStr);
+                        if (!existing.contains(uuidStr)) toRemove.add(uuidStr);
                     }
                     if (toRemove.isEmpty()) return;
                     java.util.List<String> toRemoveFinal = toRemove;
@@ -215,5 +220,23 @@ public class NetroPlugin extends JavaPlugin {
     public void setPendingRelocate(java.util.UUID playerUuid, dev.netro.gui.PendingRelocate pending) {
         if (pending == null) pendingRelocateByPlayer.remove(playerUuid);
         else pendingRelocateByPlayer.put(playerUuid, pending);
+    }
+
+    public dev.netro.gui.PendingPortalLink getPendingPortalLink(java.util.UUID playerUuid) {
+        return pendingPortalLinkByPlayer.get(playerUuid);
+    }
+
+    public void setPendingPortalLink(java.util.UUID playerUuid, dev.netro.gui.PendingPortalLink pending) {
+        if (pending == null) pendingPortalLinkByPlayer.remove(playerUuid);
+        else pendingPortalLinkByPlayer.put(playerUuid, pending);
+    }
+
+    public dev.netro.gui.ReopenPortalLinkGui getReopenPortalLinkAfterSave(java.util.UUID playerUuid) {
+        return reopenPortalLinkAfterSaveByPlayer.get(playerUuid);
+    }
+
+    public void setReopenPortalLinkAfterSave(java.util.UUID playerUuid, dev.netro.gui.ReopenPortalLinkGui data) {
+        if (data == null) reopenPortalLinkAfterSaveByPlayer.remove(playerUuid);
+        else reopenPortalLinkAfterSaveByPlayer.put(playerUuid, data);
     }
 }

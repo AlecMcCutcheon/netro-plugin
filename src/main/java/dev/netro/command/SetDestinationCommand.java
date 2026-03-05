@@ -4,6 +4,7 @@ import dev.netro.NetroPlugin;
 import dev.netro.database.CartRepository;
 import dev.netro.database.StationRepository;
 import dev.netro.database.TransferNodeRepository;
+import dev.netro.gui.RulesMainHolder;
 import dev.netro.model.Station;
 import dev.netro.util.DestinationResolver;
 import org.bukkit.Location;
@@ -48,10 +49,6 @@ public class SetDestinationCommand implements CommandExecutor {
             return true;
         }
         String address = addressOpt.get();
-        Optional<Station> station = stationRepo.findByAddress(address)
-            .or(() -> stationRepo.findAll().stream()
-                .filter(s -> address.equals(s.getAddress()) || address.startsWith(s.getAddress() + "."))
-                .findFirst());
 
         Minecart cart = null;
 
@@ -86,8 +83,8 @@ public class SetDestinationCommand implements CommandExecutor {
         }
         cartRepo.setDestination(cartUuid, address, originStationId);
         plugin.getDetectorRailHandler().recheckTerminalReleaseForCart(cartUuid);
-        String displayName = station.map(Station::getName).orElse(address);
-        sender.sendMessage("Destination set to " + address + " (" + displayName + ") for this cart.");
+        String display = RulesMainHolder.formatDestinationId(address, stationRepo, nodeRepo);
+        sender.sendMessage("Destination set to " + display + " for this cart.");
         return true;
     }
 

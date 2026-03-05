@@ -2,6 +2,7 @@ package dev.netro.gui;
 
 import dev.netro.model.Station;
 import dev.netro.model.TransferNode;
+import dev.netro.util.AddressHelper;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.inventory.Inventory;
@@ -84,7 +85,7 @@ public class CartDestinationHolder implements InventoryHolder {
     /** Set specific terminal button. stationName is used for display in lore. */
     public void setTerminalButton(int slot, TransferNode terminal, String stationAddress, String stationName) {
         int idx = terminal.getTerminalIndex() != null ? terminal.getTerminalIndex() : 0;
-        String addr = stationAddress + "." + idx;
+        String addr = AddressHelper.terminalAddress(stationAddress, idx);
         slotToAddress.put(slot, addr);
         inventory.setItem(slot, newItem(Material.CHEST, terminal.getName(),
             List.of(stationName + ": " + terminal.getName())));

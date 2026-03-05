@@ -2,8 +2,10 @@ package dev.netro.gui;
 
 import dev.netro.NetroPlugin;
 import dev.netro.database.RuleRepository;
+import dev.netro.database.StationRepository;
 import dev.netro.database.TransferNodeRepository;
 import dev.netro.model.Rule;
+import dev.netro.util.DestinationResolver;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.block.data.Rail;
@@ -91,8 +93,11 @@ public class RulesSetRailStateHolder implements InventoryHolder {
 
     public int createRuleWithShape(Rail.Shape shape) {
         var db = plugin.getDatabase();
-        RuleRepository repo = new RuleRepository(db, new TransferNodeRepository(db));
+        var stationRepo = new StationRepository(db);
+        var nodeRepo = new TransferNodeRepository(db);
+        RuleRepository repo = new RuleRepository(db, nodeRepo);
         int ruleIndex = repo.nextRuleIndex(contextType, contextId, contextSide);
+        String storedDestId = DestinationResolver.normalizeToNewFormatForStorage(stationRepo, nodeRepo, destinationId);
         Rule rule = new Rule(
             UUID.randomUUID().toString(),
             contextType,
@@ -101,7 +106,7 @@ public class RulesSetRailStateHolder implements InventoryHolder {
             ruleIndex,
             triggerType,
             destinationPositive,
-            destinationId,
+            storedDestId != null ? storedDestId : destinationId,
             Rule.ACTION_SET_RAIL_STATE,
             shape.name(),
             System.currentTimeMillis()

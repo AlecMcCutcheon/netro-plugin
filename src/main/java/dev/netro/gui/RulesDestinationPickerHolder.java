@@ -6,6 +6,7 @@ import dev.netro.database.TransferNodeRepository;
 import dev.netro.model.Rule;
 import dev.netro.model.Station;
 import dev.netro.model.TransferNode;
+import dev.netro.util.AddressHelper;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.inventory.Inventory;
@@ -100,7 +101,7 @@ public class RulesDestinationPickerHolder implements InventoryHolder {
                 for (TransferNode node : nodeRepo.findTerminals(station.getId())) {
                     if (slot >= SIZE) break;
                     if (node.getTerminalIndex() == null) continue;
-                    String destId = stationAddress + "." + node.getTerminalIndex();
+                    String destId = AddressHelper.terminalAddress(stationAddress, node.getTerminalIndex());
                     String display = station.getName() + ":" + node.getName();
                     options.add(new DestinationOption(slot, destId, display));
                     inventory.setItem(slot, newItem(Material.MINECART, display, List.of("Terminal blocked.")));
@@ -126,7 +127,7 @@ public class RulesDestinationPickerHolder implements InventoryHolder {
                 String destId;
                 String display;
                 if (node.isTerminal() && node.getTerminalIndex() != null) {
-                    destId = stationAddress + "." + node.getTerminalIndex();
+                    destId = AddressHelper.terminalAddress(stationAddress, node.getTerminalIndex());
                     display = station.getName() + ":" + node.getName();
                 } else {
                     destId = station.getName() + ":" + node.getName();

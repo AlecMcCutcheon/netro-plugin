@@ -71,7 +71,7 @@ public class RulesCreateStep1Holder implements InventoryHolder {
         inventory.setItem(SLOT_DETECTED, detected);
         inventory.setItem(SLOT_BACK, newItem(Material.ARROW, "Back", List.of("Back to rules.")));
         if (editRule != null) {
-            inventory.setItem(SLOT_SAVE, newItem(Material.EMERALD, "Save and go back", List.of("Save & back.")));
+            inventory.setItem(SLOT_SAVE, newItem(Material.EMERALD, "Save and return to rules", List.of("Save rule and return to rules list.")));
             inventory.setItem(SLOT_NEXT, newItem(Material.SPECTRAL_ARROW, "Next", List.of("Next: destination.")));
         }
     }

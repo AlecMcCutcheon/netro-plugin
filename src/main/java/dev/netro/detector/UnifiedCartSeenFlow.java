@@ -84,6 +84,10 @@ public class UnifiedCartSeenFlow {
             } else {
                 cartRepo.setDestination(cartUuid, null, null);
             }
+            if (plugin.getChunkLoadService() != null) {
+                plugin.getChunkLoadService().ensureCartTaskRunning();
+            }
+            plugin.getDetectorRailHandler().recheckTerminalReleaseForCart(cartUuid);
         }
         // 2) If at a station with no destination, apply no-destination rule (set dest or remove if no terminals).
         String currentStationId = resolveCurrentStationId(detectors);
@@ -95,19 +99,10 @@ public class UnifiedCartSeenFlow {
                 || "".equals(cartDataForNoDest.get().get("destination_address"));
             if (noDest) {
                 ranNoDestAtStart = true;
-                String worldNameForDespawn = world.getName();
-                java.util.UUID cartUuidObj = cart.getUniqueId();
+                final Minecart cartToRemove = cart;
                 routing.applyNoDestinationRule(cartUuid, currentStationId, () ->
                     plugin.getServer().getScheduler().runTask(plugin, () -> {
-                        World w = plugin.getServer().getWorld(worldNameForDespawn);
-                        if (w != null) {
-                            for (org.bukkit.entity.Entity e : w.getEntities()) {
-                                if (e.getUniqueId().equals(cartUuidObj)) {
-                                    e.remove();
-                                    break;
-                                }
-                            }
-                        }
+                        if (cartToRemove != null && cartToRemove.isValid()) cartToRemove.remove();
                     }));
             }
         }

@@ -10,8 +10,10 @@ import dev.netro.model.Controller;
 import dev.netro.model.Detector;
 import dev.netro.model.Station;
 import dev.netro.model.TransferNode;
+import dev.netro.util.DimensionHelper;
 import dev.netro.util.SignTextHelper;
 import org.bukkit.Material;
+import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.entity.Player;
 import org.bukkit.block.BlockFace;
@@ -128,10 +130,10 @@ public class DetectorControllerSignListener implements Listener {
             return;
         }
 
-        ResolvedTarget target = resolveTarget(name);
+        ResolvedTarget target = resolveTarget(name, bulb.getWorld());
         if (target.error != null) {
             if ("[Transfer]".equalsIgnoreCase(line0) || "[Terminal]".equalsIgnoreCase(line0)) {
-                target = ensureNodeForDetector(name, line0);
+                target = ensureNodeForDetector(name, line0, bulb.getWorld());
                 if (target.error != null) {
                     player.sendMessage(target.error);
                     return;
@@ -240,9 +242,9 @@ public class DetectorControllerSignListener implements Listener {
 
     /**
      * For [Transfer] or [Terminal] detector when the node doesn't exist yet: create transfer node or terminal at the station.
-     * Name must be "StationName:NodeName". Station must exist. Returns ResolvedTarget with nodeId set or error.
+     * Name must be "StationName:NodeName". Station must exist in the same dimension as the sign. Returns ResolvedTarget with nodeId set or error.
      */
-    private ResolvedTarget ensureNodeForDetector(String name, String line0) {
+    private ResolvedTarget ensureNodeForDetector(String name, String line0, World world) {
         ResolvedTarget t = new ResolvedTarget();
         int colon = name.indexOf(':');
         if (colon <= 0 || colon >= name.length() - 1) {
@@ -255,9 +257,15 @@ public class DetectorControllerSignListener implements Listener {
             t.error = "Station name and node name must both be non-empty (Station:Node).";
             return t;
         }
-        Optional<Station> stationOpt = stationRepo.findByNameIgnoreCase(stationName);
+        int dimension = world != null ? DimensionHelper.dimensionFromEnvironment(world.getEnvironment()) : DimensionHelper.DIMENSION_OVERWORLD;
+        Optional<Station> stationOpt = stationRepo.findByNameIgnoreCaseAndDimension(stationName, dimension);
+        if (stationOpt.isEmpty() && world != null) {
+            stationOpt = stationRepo.findByNameIgnoreCase(stationName)
+                .filter(st -> st.getDimension() == dimension || world.getName().equals(st.getWorld()));
+        }
         if (stationOpt.isEmpty()) {
-            t.error = "Station \"" + stationName + "\" not found. Create the station first by placing a [Station] sign with the station name on line 2.";
+            String dimName = dimension == DimensionHelper.DIMENSION_NETHER ? "Nether" : "Overworld";
+            t.error = "Station \"" + stationName + "\" not found in this dimension (" + dimName + "). Create the station here first (place a [Station] sign with the station name on line 2).";
             return t;
         }
         String stationId = stationOpt.get().getId();
@@ -304,7 +312,7 @@ public class DetectorControllerSignListener implements Listener {
 
     private void handleControllerSign(SignChangeEvent event, Block bulb, String name) {
         Player player = event.getPlayer();
-        ResolvedTarget target = resolveTarget(name);
+        ResolvedTarget target = resolveTarget(name, bulb.getWorld());
         if (target.error != null) {
             player.sendMessage(target.error);
             return;
@@ -405,26 +413,46 @@ public class DetectorControllerSignListener implements Listener {
         String error;
     }
 
-    /** Resolve line 2 to a transfer node or terminal: "StationName:NodeName" or bare node name across stations. */
-    private ResolvedTarget resolveTarget(String name) {
+    /** Resolve line 2 to a transfer node or terminal: "StationName:NodeName" (same dimension as world) or bare node name across stations. */
+    private ResolvedTarget resolveTarget(String name, World world) {
         ResolvedTarget t = new ResolvedTarget();
         int colon = name.indexOf(':');
         if (colon > 0 && colon < name.length() - 1) {
             String stationName = name.substring(0, colon).strip();
             String nodeName = name.substring(colon + 1).strip();
             if (!stationName.isEmpty() && !nodeName.isEmpty()) {
-                Optional<TransferNode> node = stationRepo.findByNameIgnoreCase(stationName)
-                    .flatMap(st -> nodeRepo.findByNameAtStation(st.getId(), nodeName));
+                int signDimension = world != null ? DimensionHelper.dimensionFromEnvironment(world.getEnvironment()) : -1;
+                Optional<Station> stationOpt = world != null
+                    ? stationRepo.findByNameIgnoreCaseAndDimension(stationName, signDimension)
+                    : stationRepo.findByNameIgnoreCase(stationName);
+                if (stationOpt.isEmpty() && world != null) {
+                    stationOpt = stationRepo.findByNameIgnoreCase(stationName)
+                        .filter(st -> st.getDimension() == signDimension || world.getName().equals(st.getWorld()));
+                }
+                Optional<TransferNode> node = stationOpt.flatMap(st -> nodeRepo.findByNameAtStation(st.getId(), nodeName));
                 if (node.isPresent()) {
                     t.nodeId = node.get().getId();
                     return t;
                 }
-                t.error = "Unknown Station:Node";
+                if (stationOpt.isPresent()) {
+                    t.error = "No node named \"" + nodeName + "\" at station \"" + stationName + "\". Create the node from Rules (Pair/Node Options) first.";
+                } else {
+                    t.error = world != null
+                        ? "No station named \"" + stationName + "\" in this dimension. Create the station here, or use Station:Node that exists in this world."
+                        : "Unknown Station:Node";
+                }
                 return t;
             }
         }
         Optional<TransferNode> node = nodeRepo.findByNameAcrossStations(name);
         if (node.isPresent()) {
+            if (world != null) {
+                Optional<Station> stOpt = stationRepo.findById(node.get().getStationId());
+                if (stOpt.isPresent() && stOpt.get().getDimension() != DimensionHelper.dimensionFromEnvironment(world.getEnvironment())) {
+                    t.error = "That node is at a station in another dimension. Use Station:Node for a station in this dimension.";
+                    return t;
+                }
+            }
             t.nodeId = node.get().getId();
             return t;
         }

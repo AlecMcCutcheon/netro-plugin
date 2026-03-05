@@ -1,6 +1,9 @@
 package dev.netro.gui;
 
 import dev.netro.NetroPlugin;
+import dev.netro.database.TransferNodePortalRepository;
+import dev.netro.util.DimensionHelper;
+import dev.netro.util.PortalTracer;
 import org.bukkit.Color;
 import org.bukkit.Location;
 import org.bukkit.Material;
@@ -10,6 +13,9 @@ import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
 import org.bukkit.entity.Player;
 import org.bukkit.util.RayTraceResult;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Repeating task that highlights the block a player is looking at when they are in
@@ -22,6 +28,7 @@ public final class BlockHighlightTask implements Runnable {
     private static final float DUST_SIZE = 0.4f;
     private static final Color RELOCATE_HIGHLIGHT = Color.AQUA;
     private static final Color RAIL_HIGHLIGHT = Color.fromRGB(255, 220, 100);
+    private static final Color PORTAL_LINK_HIGHLIGHT = Color.fromRGB(180, 100, 255);
 
     private final NetroPlugin plugin;
 
@@ -31,17 +38,43 @@ public final class BlockHighlightTask implements Runnable {
 
     @Override
     public void run() {
+        List<Player> withPending = new ArrayList<>();
         for (Player player : plugin.getServer().getOnlinePlayers()) {
             if (!player.isOnline() || !player.getWorld().isChunkLoaded(player.getLocation().getBlockX() >> 4, player.getLocation().getBlockZ() >> 4)) {
                 continue;
             }
+            if (plugin.getPendingRelocate(player.getUniqueId()) != null
+                || plugin.getPendingSetRailState(player.getUniqueId()) != null
+                || plugin.getPendingPortalLink(player.getUniqueId()) != null) {
+                withPending.add(player);
+            }
+        }
+        for (Player player : withPending) {
             Block target = getTargetBlock(player);
             if (target == null) continue;
 
             boolean inRelocate = plugin.getPendingRelocate(player.getUniqueId()) != null;
             boolean inSetRail = plugin.getPendingSetRailState(player.getUniqueId()) != null;
+            boolean inPortalLink = plugin.getPendingPortalLink(player.getUniqueId()) != null;
 
-            if (inRelocate) {
+            if (inPortalLink) {
+                PendingPortalLink pending = plugin.getPendingPortalLink(player.getUniqueId());
+                if (pending != null) {
+                    int expectedDim = PortalLinkHelper.getExpectedDimensionForSide(pending.nodeId(), pending.side(), plugin.getDatabase());
+                    int targetDim = DimensionHelper.dimensionFromEnvironment(target.getWorld().getEnvironment());
+                    if (targetDim == expectedDim) {
+                        List<TransferNodePortalRepository.BlockPos> portalBlocks = PortalTracer.tracePortal(
+                            target.getWorld(), target.getX(), target.getY(), target.getZ());
+                        if (!portalBlocks.isEmpty()) {
+                            for (TransferNodePortalRepository.BlockPos p : portalBlocks) {
+                                if (!player.getWorld().getName().equals(p.world())) continue;
+                                Block b = target.getWorld().getBlockAt(p.x(), p.y(), p.z());
+                                drawBlockOutline(player, b, PORTAL_LINK_HIGHLIGHT);
+                            }
+                        }
+                    }
+                }
+            } else if (inRelocate) {
                 if (!target.getType().isAir()) {
                     Block placeAt = target.getRelative(BlockFace.UP);
                     drawBlockOutline(player, placeAt, RELOCATE_HIGHLIGHT);

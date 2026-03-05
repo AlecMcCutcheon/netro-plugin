@@ -27,7 +27,8 @@ public final class RailroadControllerItem {
             meta.setDisplayName(DISPLAY_NAME);
             meta.setLore(List.of(
                 "Right-click a rail to set its direction.",
-                "Sneak+right-click a detector/controller sign to open Rules."
+                "Sneak+right-click a detector/controller sign to open Rules.",
+                "Boundaries: mainnet red, cluster amber, localnet green."
             ));
             meta.getPersistentDataContainer().set(key(plugin), PersistentDataType.BYTE, (byte) 1);
         }

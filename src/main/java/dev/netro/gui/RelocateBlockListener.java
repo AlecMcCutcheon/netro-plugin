@@ -4,8 +4,11 @@ import dev.netro.NetroPlugin;
 import dev.netro.detector.CopperBulbHelper;
 import dev.netro.database.ControllerRepository;
 import dev.netro.database.DetectorRepository;
+import dev.netro.database.TransferNodePortalRepository;
 import dev.netro.model.Controller;
 import dev.netro.model.Detector;
+import dev.netro.util.DimensionHelper;
+import dev.netro.util.PortalTracer;
 import org.bukkit.*;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
@@ -17,6 +20,8 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.player.PlayerInteractEvent;
+
+import java.util.List;
 
 /**
  * Handles block clicks when the player is in the relocate flow: click the target block and the
@@ -35,13 +40,55 @@ public class RelocateBlockListener implements Listener {
         if (event.getAction() != Action.RIGHT_CLICK_BLOCK || event.getHand() != org.bukkit.inventory.EquipmentSlot.HAND) {
             return;
         }
-        PendingRelocate pending = plugin.getPendingRelocate(event.getPlayer().getUniqueId());
-        if (pending == null) return;
-
-        event.setCancelled(true);
         Player player = event.getPlayer();
         Block clicked = event.getClickedBlock();
         if (clicked == null) return;
+
+        PendingPortalLink portalLink = plugin.getPendingPortalLink(player.getUniqueId());
+        if (portalLink != null) {
+            event.setCancelled(true);
+            List<TransferNodePortalRepository.BlockPos> blocks = PortalTracer.tracePortal(
+                clicked.getWorld(), clicked.getX(), clicked.getY(), clicked.getZ());
+            if (blocks.isEmpty()) {
+                player.sendMessage("Look at a nether portal block or its obsidian frame, then right-click.");
+                return;
+            }
+            int expectedDim = PortalLinkHelper.getExpectedDimensionForSide(portalLink.nodeId(), portalLink.side(), plugin.getDatabase());
+            int clickDim = DimensionHelper.dimensionFromEnvironment(clicked.getWorld().getEnvironment());
+            if (clickDim != expectedDim) {
+                String expectedName = expectedDim == DimensionHelper.DIMENSION_NETHER ? "Nether" : "Overworld";
+                player.sendMessage("This side must be a portal in the " + expectedName + ". You are in the wrong dimension.");
+                return;
+            }
+            TransferNodePortalRepository repo = new TransferNodePortalRepository(plugin.getDatabase());
+            int otherSide = portalLink.side() == TransferNodePortalRepository.SIDE_SAME_DIMENSION
+                ? TransferNodePortalRepository.SIDE_OTHER_DIMENSION
+                : TransferNodePortalRepository.SIDE_SAME_DIMENSION;
+            List<TransferNodePortalRepository.BlockPos> otherBlocks = repo.getBlocks(portalLink.nodeId(), otherSide);
+            if (PortalLinkHelper.anyBlockOverlaps(blocks, otherBlocks)) {
+                String otherLabel = portalLink.side() == TransferNodePortalRepository.SIDE_SAME_DIMENSION ? "Nether" : "Overworld";
+                player.sendMessage("This portal is already set as the " + otherLabel + " side. Choose a different portal.");
+                return;
+            }
+            repo.saveBlocks(portalLink.nodeId(), portalLink.side(), blocks);
+            plugin.setPendingPortalLink(player.getUniqueId(), null);
+            String sideLabel = portalLink.side() == TransferNodePortalRepository.SIDE_OTHER_DIMENSION ? "other dimension (Nether)" : "this dimension";
+            player.sendMessage("Portal link saved for this node (" + sideLabel + ", " + blocks.size() + " blocks).");
+            ReopenPortalLinkGui reopen = plugin.getReopenPortalLinkAfterSave(player.getUniqueId());
+            if (reopen != null) {
+                plugin.setReopenPortalLinkAfterSave(player.getUniqueId(), null);
+                org.bukkit.Bukkit.getScheduler().runTask(plugin, () -> {
+                    PortalLinkHolder holder = new PortalLinkHolder(plugin, reopen.nodeId(), reopen.pairedNodeId(), reopen.pairedLabel(), reopen.rulesTitle());
+                    player.openInventory(holder.getInventory());
+                });
+            }
+            return;
+        }
+
+        PendingRelocate pending = plugin.getPendingRelocate(player.getUniqueId());
+        if (pending == null) return;
+
+        event.setCancelled(true);
 
         if (pending instanceof PendingRelocate.Source src) {
             resolveAndRelocateTo(player, clicked, src.nodeId());
