@@ -6,36 +6,14 @@ Minecraft (Spigot/Paper **1.21–1.21.11**, tested with 1.21.11) plugin for **ra
 
 ## What's in this release (1.3.0 Beta)
 
-### Performance optimizations
+**Performance optimizations** (behavior unchanged; less main-thread work):
 
-- **Detector / apply** — Rail and bulb updates are spread across ticks (light work first, then rails, ready center, deferred rail task, title, cruise, bulbs) so no single tick does all work. Cart from the event is reused so we skip entity lookup when valid.
-- **Cart chunk loading** — Cart list is fetched **asynchronously**; main thread only applies chunk tickets. **Current-dimension** (current + ahead) chunk loading is **skipped when a player is in the cart** (the player already keeps those chunks loaded). **Portal (other-dimension)** lookup still runs; its **database work is now async** (portal repo uses connection overloads; main thread only applies the returned chunk sets).
-- **Terminal polling** — Database and “should we RELEASE?” logic run in async; main thread only does cart/block checks and applies bulb list.
-- **Throttling** — Detector runs at most every 250 ms per cart; READY velocity correction is throttled and tuned to reduce jitter while keeping carts centered.
+- **Detector / apply** — Rail and bulb updates spread across ticks (rails → ready center → deferred rail → title → cruise → bulbs). Cart from the event is reused to skip entity lookup.
+- **Cart chunk loading** — Cart list fetched **async**; main thread only applies tickets. Current-dim loading **skipped when a player is in the cart**. Portal (other-dim) lookup unchanged; its **DB work is now async**.
+- **Terminal polling** — DB and RELEASE logic run async; main thread only does cart/block checks and applies bulb list.
+- **Throttling** — Detector at most every 250 ms per cart; READY velocity correction throttled and tuned.
 
-### Route cache and commands
-
-- **Route cache** — Shortest-path results are cached; TTL is based on **Minecraft world time** (ticks), not real time, so cache doesn’t expire while the server is off. Stale-while-revalidate: expired entries are still used and refreshed in the background. One worker processes at most one path per 10 ticks; every 30 minutes all reachable station pairs can be enqueued for refresh. Config: **`route-cache-ttl-ms`** (default 30 min) is converted to world ticks.
-- **`/netro clearcache`** — Clears all route caches and the refresh queue. Use after major network changes if you want paths recomputed immediately.
-- **`/netro cancel`** — Cancels pending relocate, portal link, or set-rail-state action.
-- **`/netro whereami`** — Shows your current region and station (if you’re at one).
-
-### Routes menu and UI
-
-- **Routes (slot 50)** — In the Rules screen, **slot 50** opens the cached routes list. At a **terminal**, shows all cached routes from that station. At a **transfer**, shows only routes that use that transfer as first hop. **Clear all** at terminal clears the whole station’s cache; at transfer clears only that transfer’s routes.
-- **Routing cost** — Path cost = experienced blocks (1 block = 1 cost in any dimension). Nether pairing and cross-dimension paths unchanged.
-
-### Portal linking
-
-- **Portal Link** — For paired transfer nodes (Overworld ↔ Nether), you can link each node to the actual portal blocks so routing can cost the hop correctly. In the Rules screen (or from the unpair/confirm flow), open **Portal Link** for the transfer node. Choose **Overworld side** or **Nether side**, then right-click the portal blocks in the world. Set both sides on both nodes for routing to use the link. **Clear** removes the portal link for that node. Use **`/netro cancel`** to cancel a pending portal-link click.
-
-### Rules: set rail state
-
-- **Multiple rails per rule** — A single rule can set **multiple rail states**. Add entries (rail + shape) to the rule’s list; state is applied when the cart is within 2 blocks of each rail, so different directions get the right switches. A 30s timeout and hitting another detector clear the pending list.
-
-### Version
-
-- **1.3.0-beta** (Beta)
+**Compatibility** — 1.21–1.21.11 (tested with 1.21.11). All 1.2.0 features (route cache, routes menu, portal linking, multi-rail rules, etc.) unchanged.
 
 ---
 
