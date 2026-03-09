@@ -1,8 +1,6 @@
 # Netro — Rail Network Plugin
 
-Minecraft (Spigot/Paper 1.21–1.21.11) plugin for **rail networks**: stations, transfer nodes, terminals, and automated cart routing. Sign-based setup, pathfinding with route cache, and rule-driven behavior (speed, switches, release mechanisms).
-
-**Compatible with Minecraft 1.21 through 1.21.11** (Spigot or Paper). Tested with 1.21.11.
+Minecraft (Spigot/Paper **1.21–1.21.11**, tested with 1.21.11) plugin for **rail networks**: stations, transfer nodes, terminals, and automated cart routing. Sign-based setup, pathfinding with route cache, and rule-driven behavior (speed, switches, release mechanisms).
 
 ---
 
@@ -37,14 +35,13 @@ Minecraft (Spigot/Paper 1.21–1.21.11) plugin for **rail networks**: stations, 
 
 ### Version
 
-- **1.3.0-beta** (Beta — optimizations and 1.21.11 compatibility)
+- **1.3.0-beta** (Beta)
 
 ---
 
 ## Requirements
 
-- **Minecraft** 1.21–1.21.11 (Spigot/Paper or compatible). Tested with **1.21.11**.
-- **Java** 17+
+- **Minecraft** 1.21–1.21.11 (Spigot/Paper). **Java** 17+
 
 ---
 
