@@ -26,7 +26,11 @@ import java.util.Optional;
  */
 public class UnifiedCartSeenFlow {
 
-    public record Result(boolean ranNoDestAtStart) {}
+    public record Result(boolean ranNoDestAtStart, boolean removeCart, java.util.List<String> recheckCartUuids, boolean ensureCartTaskRunning) {
+        public Result(boolean ranNoDestAtStart) {
+            this(ranNoDestAtStart, false, java.util.List.of(), false);
+        }
+    }
 
     private final NetroPlugin plugin;
     private final CartRepository cartRepo;
@@ -44,9 +48,13 @@ public class UnifiedCartSeenFlow {
     }
 
     /**
-     * Run the unified flow. Call from the detector async block before the node loop.
+     * Run the unified flow. Call from the detector block before the node loop.
+     * Uses a single cart find for both registration check and no-dest check.
      *
-     * @return result with ranNoDestAtStart so the caller can skip re-running the no-dest rule.
+     * @param preFetchedCartData when present, use this instead of cartRepo.find (e.g. from async read); null = fetch now.
+     * @param currentStationIdHint when present, use this instead of resolving from detectors (avoids DB in hot path).
+     * @param asyncOut when non-null, async mode: do not call plugin/scheduler; write removeCart, recheckCartUuids, ensureCartTaskRunning for main to apply.
+     * @return result with ranNoDestAtStart (and when asyncOut set: removeCart, recheckCartUuids, ensureCartTaskRunning).
      */
     public Result run(
         String cartUuid,
@@ -56,13 +64,30 @@ public class UnifiedCartSeenFlow {
         int cartBlockX,
         int cartBlockY,
         int cartBlockZ,
-        Optional<String> directionHintStationId
+        Optional<String> directionHintStationId,
+        Optional<Map<String, Object>> preFetchedCartData,
+        Optional<String> currentStationIdHint
     ) {
-        if (world == null || cart == null) {
-            return new Result(false);
-        }
-        // 1) If cart not yet managed, add to DB and set destination. Prefer station the cart is heading toward (CLEAR at transfer = leaving toward paired station).
-        if (cartRepo.find(cartUuid).isEmpty()) {
+        return run(cartUuid, world, cart, detectors, cartBlockX, cartBlockY, cartBlockZ, directionHintStationId, preFetchedCartData, currentStationIdHint, null);
+    }
+
+    public Result run(
+        String cartUuid,
+        World world,
+        Minecart cart,
+        List<Detector> detectors,
+        int cartBlockX,
+        int cartBlockY,
+        int cartBlockZ,
+        Optional<String> directionHintStationId,
+        Optional<Map<String, Object>> preFetchedCartData,
+        Optional<String> currentStationIdHint,
+        AsyncOut asyncOut
+    ) {
+        if (world == null || cart == null) return new Result(false);
+        Optional<Map<String, Object>> cartDataOpt = preFetchedCartData != null ? preFetchedCartData : cartRepo.find(cartUuid);
+        // 1) If cart not yet managed, add to DB and set destination.
+        if (cartDataOpt.isEmpty()) {
             String worldName = world.getName();
             Optional<String> terminalAddress = directionHintStationId
                 .filter(stId -> nodeRepo.findAvailableTerminal(stId).isPresent())
@@ -84,29 +109,93 @@ public class UnifiedCartSeenFlow {
             } else {
                 cartRepo.setDestination(cartUuid, null, null);
             }
-            if (plugin.getChunkLoadService() != null) {
-                plugin.getChunkLoadService().ensureCartTaskRunning();
+            if (asyncOut != null) {
+                asyncOut.ensureCartTaskRunning = true;
+                asyncOut.recheckCartUuids.add(cartUuid);
+            } else {
+                if (plugin.getChunkLoadService() != null) plugin.getChunkLoadService().ensureCartTaskRunning();
+                plugin.getDetectorRailHandler().recheckTerminalReleaseForCart(cartUuid);
             }
-            plugin.getDetectorRailHandler().recheckTerminalReleaseForCart(cartUuid);
         }
-        // 2) If at a station with no destination, apply no-destination rule (set dest or remove if no terminals).
-        String currentStationId = resolveCurrentStationId(detectors);
+        // 2) No-dest at station → apply no-destination rule.
+        String currentStationId = currentStationIdHint != null && currentStationIdHint.isPresent() ? currentStationIdHint.get() : resolveCurrentStationId(detectors);
         boolean ranNoDestAtStart = false;
         if (currentStationId != null) {
-            Optional<Map<String, Object>> cartDataForNoDest = cartRepo.find(cartUuid);
-            boolean noDest = cartDataForNoDest.isEmpty()
-                || cartDataForNoDest.get().get("destination_address") == null
-                || "".equals(cartDataForNoDest.get().get("destination_address"));
+            boolean noDest = cartDataOpt.isEmpty()
+                || cartDataOpt.get().get("destination_address") == null
+                || "".equals(cartDataOpt.get().get("destination_address"));
             if (noDest) {
                 ranNoDestAtStart = true;
                 final Minecart cartToRemove = cart;
-                routing.applyNoDestinationRule(cartUuid, currentStationId, () ->
-                    plugin.getServer().getScheduler().runTask(plugin, () -> {
+                routing.applyNoDestinationRule(cartUuid, currentStationId, () -> {
+                    if (asyncOut != null) asyncOut.removeCart = true;
+                    else plugin.getServer().getScheduler().runTask(plugin, () -> {
                         if (cartToRemove != null && cartToRemove.isValid()) cartToRemove.remove();
-                    }));
+                    });
+                });
             }
         }
+        if (asyncOut != null) return new Result(ranNoDestAtStart, asyncOut.removeCart, List.copyOf(asyncOut.recheckCartUuids), asyncOut.ensureCartTaskRunning);
         return new Result(ranNoDestAtStart);
+    }
+
+    /**
+     * Async-only: same as run but with worldName (no World/cart). Call from DB executor; AsyncOut is required.
+     */
+    public Result runWithWorldName(
+        String cartUuid,
+        String worldName,
+        List<Detector> detectors,
+        int cartBlockX,
+        int cartBlockY,
+        int cartBlockZ,
+        Optional<String> directionHintStationId,
+        Optional<Map<String, Object>> preFetchedCartData,
+        Optional<String> currentStationIdHint,
+        AsyncOut asyncOut
+    ) {
+        if (worldName == null || asyncOut == null) return new Result(false);
+        Optional<Map<String, Object>> cartDataOpt = preFetchedCartData != null ? preFetchedCartData : cartRepo.find(cartUuid);
+        if (cartDataOpt.isEmpty()) {
+            Optional<String> terminalAddress = directionHintStationId
+                .filter(stId -> nodeRepo.findAvailableTerminal(stId).isPresent())
+                .flatMap(stId -> stationRepo.findById(stId)
+                    .flatMap(st -> nodeRepo.findAvailableTerminal(stId)
+                        .flatMap(t -> Optional.ofNullable(t.terminalAddress(st.getAddress())))));
+            if (terminalAddress.isEmpty()) {
+                terminalAddress = stationRepo.findAll().stream()
+                    .filter(s -> worldName.equals(s.getWorld()))
+                    .filter(s -> nodeRepo.findAvailableTerminal(s.getId()).isPresent())
+                    .min((a, b) -> Long.compare(
+                        sq(cartBlockX - a.getSignX()) + sq(cartBlockY - a.getSignY()) + sq(cartBlockZ - a.getSignZ()),
+                        sq(cartBlockX - b.getSignX()) + sq(cartBlockY - b.getSignY()) + sq(cartBlockZ - b.getSignZ())))
+                    .flatMap(st -> nodeRepo.findAvailableTerminal(st.getId())
+                        .flatMap(t -> Optional.ofNullable(t.terminalAddress(st.getAddress()))));
+            }
+            if (terminalAddress.isPresent()) cartRepo.setDestination(cartUuid, terminalAddress.get(), null);
+            else cartRepo.setDestination(cartUuid, null, null);
+            asyncOut.ensureCartTaskRunning = true;
+            asyncOut.recheckCartUuids.add(cartUuid);
+        }
+        String currentStationId = currentStationIdHint != null && currentStationIdHint.isPresent() ? currentStationIdHint.get() : resolveCurrentStationId(detectors);
+        boolean ranNoDestAtStart = false;
+        if (currentStationId != null) {
+            boolean noDest = cartDataOpt.isEmpty()
+                || cartDataOpt.get().get("destination_address") == null
+                || "".equals(cartDataOpt.get().get("destination_address"));
+            if (noDest) {
+                ranNoDestAtStart = true;
+                routing.applyNoDestinationRule(cartUuid, currentStationId, () -> asyncOut.removeCart = true);
+            }
+        }
+        return new Result(ranNoDestAtStart, asyncOut.removeCart, List.copyOf(asyncOut.recheckCartUuids), asyncOut.ensureCartTaskRunning);
+    }
+
+    /** Mutable holder for async-mode outputs (main thread will apply these). */
+    public static final class AsyncOut {
+        public boolean removeCart;
+        public final java.util.List<String> recheckCartUuids = new java.util.ArrayList<>();
+        public boolean ensureCartTaskRunning;
     }
 
     private String resolveCurrentStationId(List<Detector> detectors) {

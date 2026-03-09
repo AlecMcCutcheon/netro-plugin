@@ -129,25 +129,6 @@ public class RuleRepository {
         });
     }
 
-    /** If a blocked rule already exists for this context and destination (hop), returns it. At most one blocked rule per hop. */
-    public Optional<Rule> findBlockedRuleForDestination(String contextType, String contextId, String contextSide, String destinationId) {
-        return database.withConnection(conn -> {
-            String sql = contextSide == null
-                ? "SELECT id, context_type, context_id, context_side, rule_index, trigger_type, destination_positive, destination_id, action_type, action_data, created_at FROM rules WHERE context_type = ? AND context_id = ? AND context_side IS NULL AND trigger_type = ? AND destination_id = ?"
-                : "SELECT id, context_type, context_id, context_side, rule_index, trigger_type, destination_positive, destination_id, action_type, action_data, created_at FROM rules WHERE context_type = ? AND context_id = ? AND context_side = ? AND trigger_type = ? AND destination_id = ?";
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                ps.setString(1, contextType);
-                ps.setString(2, contextId);
-                if (contextSide != null) ps.setString(3, contextSide);
-                ps.setString(contextSide == null ? 3 : 4, Rule.TRIGGER_BLOCKED);
-                ps.setString(contextSide == null ? 4 : 5, destinationId);
-                try (ResultSet rs = ps.executeQuery()) {
-                    return rs.next() ? Optional.of(rowToRule(rs)) : Optional.empty();
-                }
-            }
-        });
-    }
-
     /** Next rule_index for this context (max + 1 or 0). */
     public int nextRuleIndex(String contextType, String contextId, String contextSide) {
         return database.withConnection(conn -> {

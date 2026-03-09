@@ -11,18 +11,18 @@ public class Rule {
 
     public static final String TRIGGER_ENTERING = "ENTERING";
     public static final String TRIGGER_CLEARING = "CLEARING";
-    /** When the hop to this destination is blocked (e.g. terminal full). One rule per (context, blocked hop). */
+    /** Deprecated: BLOCKED trigger and SET_DESTINATION action no longer used; kept for loading existing rules from DB. */
     public static final String TRIGGER_BLOCKED = "BLOCKED";
     /** Whenever a cart is detected (any pass: ENTRY, READY, or CLEAR). */
     public static final String TRIGGER_DETECTED = "DETECTED";
 
     public static final String ACTION_SET_RAIL_STATE = "SET_RAIL_STATE";
+    /** Deprecated: only used with BLOCKED trigger; kept for loading existing rules from DB. */
+    public static final String ACTION_SET_DESTINATION = "SET_DESTINATION";
     /** Set cart cruise speed (action_data = speed string e.g. "2.5" for 0.25 magnitude). */
     public static final String ACTION_SET_CRUISE_SPEED = "SET_CRUISE_SPEED";
     public static final String ACTION_SEND_ON = "SEND_ON";
     public static final String ACTION_SEND_OFF = "SEND_OFF";
-    /** Set the cart's destination (used with TRIGGER_BLOCKED; action_data = new destination id). */
-    public static final String ACTION_SET_DESTINATION = "SET_DESTINATION";
 
     private final String id;
     private final String contextType;

@@ -23,7 +23,7 @@ import java.util.UUID;
  */
 public class RailroadControllerBossBarUpdater implements Listener {
 
-    private static final long TICK_INTERVAL = 10L;
+    private static final long TICK_INTERVAL = 20L;
 
     private final NetroPlugin plugin;
     private final Map<UUID, KeyedBossBar> barByPlayer = new HashMap<>();

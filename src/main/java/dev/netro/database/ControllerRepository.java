@@ -2,6 +2,7 @@ package dev.netro.database;
 
 import dev.netro.model.Controller;
 
+import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -71,25 +72,28 @@ public class ControllerRepository {
 
     /** Find controllers for this node that match role and direction (direction null = any). */
     public List<Controller> findByNodeAndRule(String nodeId, String role, String direction) {
-        return database.withConnection(conn -> {
-            try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT id, node_id, world, x, y, z, sign_facing, rule_1_role, rule_1_direction, rule_2_role, rule_2_direction, rule_3_role, rule_3_direction, rule_4_role, rule_4_direction FROM controllers WHERE node_id = ? AND ( (rule_1_role = ? AND (rule_1_direction IS NULL OR rule_1_direction = ?)) OR (rule_2_role = ? AND (rule_2_direction IS NULL OR rule_2_direction = ?)) OR (rule_3_role = ? AND (rule_3_direction IS NULL OR rule_3_direction = ?)) OR (rule_4_role = ? AND (rule_4_direction IS NULL OR rule_4_direction = ?)) )")) {
-                ps.setString(1, nodeId);
-                ps.setString(2, role);
-                ps.setString(3, direction);
-                ps.setString(4, role);
-                ps.setString(5, direction);
-                ps.setString(6, role);
-                ps.setString(7, direction);
-                ps.setString(8, role);
-                ps.setString(9, direction);
-                try (ResultSet rs = ps.executeQuery()) {
-                    List<Controller> list = new ArrayList<>();
-                    while (rs.next()) list.add(rowToController(rs));
-                    return list;
-                }
+        return database.withConnection(conn -> findByNodeAndRule(conn, nodeId, role, direction));
+    }
+
+    /** Use when already holding a connection (e.g. inside runAsyncRead callback). */
+    public List<Controller> findByNodeAndRule(Connection conn, String nodeId, String role, String direction) throws SQLException {
+        List<Controller> list = new ArrayList<>();
+        try (PreparedStatement ps = conn.prepareStatement(
+            "SELECT id, node_id, world, x, y, z, sign_facing, rule_1_role, rule_1_direction, rule_2_role, rule_2_direction, rule_3_role, rule_3_direction, rule_4_role, rule_4_direction FROM controllers WHERE node_id = ? AND ( (rule_1_role = ? AND (rule_1_direction IS NULL OR rule_1_direction = ?)) OR (rule_2_role = ? AND (rule_2_direction IS NULL OR rule_2_direction = ?)) OR (rule_3_role = ? AND (rule_3_direction IS NULL OR rule_3_direction = ?)) OR (rule_4_role = ? AND (rule_4_direction IS NULL OR rule_4_direction = ?)) )")) {
+            ps.setString(1, nodeId);
+            ps.setString(2, role);
+            ps.setString(3, direction);
+            ps.setString(4, role);
+            ps.setString(5, direction);
+            ps.setString(6, role);
+            ps.setString(7, direction);
+            ps.setString(8, role);
+            ps.setString(9, direction);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) list.add(rowToController(rs));
             }
-        });
+        }
+        return list;
     }
 
     /** Find controller at this copper bulb position. */

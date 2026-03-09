@@ -10,6 +10,8 @@ import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Objects;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
@@ -20,6 +22,11 @@ public class Database {
 
     private final NetroPlugin plugin;
     private final ReentrantLock lock = new ReentrantLock();
+    private final ExecutorService dbExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "Netro-db-async");
+        t.setDaemon(true);
+        return t;
+    });
     private Connection connection;
 
     public Database(NetroPlugin plugin) {
@@ -60,6 +67,7 @@ public class Database {
     }
 
     public void close() {
+        dbExecutor.shutdown();
         lock.lock();
         try {
             if (connection != null && !connection.isClosed()) {
@@ -71,6 +79,24 @@ public class Database {
         } finally {
             lock.unlock();
         }
+    }
+
+    /**
+     * Run a read-only (or mixed) DB job on a background thread, then run the result consumer on the main thread.
+     * Use this to avoid blocking the main thread on DB I/O. The callback runs with the same connection/lock as withConnection.
+     */
+    public <T> void runAsyncRead(ConnectionCallback<T> callback, java.util.function.Consumer<T> onResultOnMainThread) {
+        dbExecutor.execute(() -> {
+            T result;
+            try {
+                result = withConnection(callback);
+            } catch (Throwable t) {
+                plugin.getLogger().warning("Async DB read failed: " + t.getMessage());
+                result = null;
+            }
+            T r = result;
+            plugin.getServer().getScheduler().runTask(plugin, () -> onResultOnMainThread.accept(r));
+        });
     }
 
     /**

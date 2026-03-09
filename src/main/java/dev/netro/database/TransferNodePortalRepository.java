@@ -2,8 +2,14 @@ package dev.netro.database;
 
 import org.bukkit.World;
 
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Portal blocks linked to a transfer node (for nether portal link).
@@ -56,20 +62,23 @@ public class TransferNodePortalRepository {
     }
 
     public List<BlockPos> getBlocks(String nodeId, int side) {
-        return database.withConnection(conn -> {
-            List<BlockPos> out = new ArrayList<>();
-            try (var ps = conn.prepareStatement(
-                "SELECT world, x, y, z FROM transfer_node_portal_blocks WHERE node_id = ? AND side = ?")) {
-                ps.setString(1, nodeId);
-                ps.setInt(2, side);
-                try (var rs = ps.executeQuery()) {
-                    while (rs.next()) {
-                        out.add(new BlockPos(rs.getString("world"), rs.getInt("x"), rs.getInt("y"), rs.getInt("z")));
-                    }
+        return database.withConnection(conn -> getBlocks(conn, nodeId, side));
+    }
+
+    /** Use when already holding a connection (e.g. inside runAsyncRead callback). */
+    public List<BlockPos> getBlocks(Connection conn, String nodeId, int side) throws SQLException {
+        List<BlockPos> out = new ArrayList<>();
+        try (PreparedStatement ps = conn.prepareStatement(
+            "SELECT world, x, y, z FROM transfer_node_portal_blocks WHERE node_id = ? AND side = ?")) {
+            ps.setString(1, nodeId);
+            ps.setInt(2, side);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    out.add(new BlockPos(rs.getString("world"), rs.getInt("x"), rs.getInt("y"), rs.getInt("z")));
                 }
             }
-            return out;
-        });
+        }
+        return out;
     }
 
     /** Find node that has this block in its portal link (for block-break cleanup). */
@@ -96,6 +105,30 @@ public class TransferNodePortalRepository {
             }
             return null;
         });
+    }
+
+    /** Node IDs that have at least one portal block in the given world and block region (for chunk pre-loading). */
+    public Set<String> getNodeIdsWithBlocksInRegion(String world, int minX, int maxX, int minY, int maxY, int minZ, int maxZ) {
+        return database.withConnection(conn -> getNodeIdsWithBlocksInRegion(conn, world, minX, maxX, minY, maxY, minZ, maxZ));
+    }
+
+    /** Use when already holding a connection (e.g. inside runAsyncRead callback). */
+    public Set<String> getNodeIdsWithBlocksInRegion(Connection conn, String world, int minX, int maxX, int minY, int maxY, int minZ, int maxZ) throws SQLException {
+        Set<String> out = new HashSet<>();
+        try (PreparedStatement ps = conn.prepareStatement(
+            "SELECT DISTINCT node_id FROM transfer_node_portal_blocks WHERE world = ? AND x >= ? AND x <= ? AND y >= ? AND y <= ? AND z >= ? AND z <= ?")) {
+            ps.setString(1, world);
+            ps.setInt(2, minX);
+            ps.setInt(3, maxX);
+            ps.setInt(4, minY);
+            ps.setInt(5, maxY);
+            ps.setInt(6, minZ);
+            ps.setInt(7, maxZ);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) out.add(rs.getString("node_id"));
+            }
+        }
+        return out;
     }
 
     /** Centroid (average x, y, z) of portal blocks for the given side. Returns null if no blocks. */

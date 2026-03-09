@@ -1,7 +1,8 @@
 # Netro — Rail network plugin
 # https://github.com/your-repo/netro
 
-# Debug: detector and routing logs to console (direction, role, next-hop finalDest/localDest, block reasons)
+# Debug: detector and routing logs to console (direction, role, next-hop finalDest/localDest, block reasons).
+# Leave false in production: when true, logging adds noticeable cost and can cause lag when carts hit detectors.
 debug: false
 
 # Route cache TTL in Minecraft world time: value in real-time milliseconds is converted to world ticks (20 ticks/sec). Cache expires after that much in-game time, so it does not expire while the server is off. 0 = no expiry. Effective TTL has per-pair jitter.

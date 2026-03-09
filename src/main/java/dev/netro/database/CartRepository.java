@@ -1,7 +1,9 @@
 package dev.netro.database;
 
+import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.*;
 
 public class CartRepository {
@@ -13,26 +15,29 @@ public class CartRepository {
     }
 
     public Optional<Map<String, Object>> find(String cartUuid) {
-        return database.withConnection(conn -> {
-            try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT cart_uuid, destination_address, origin_station_id, current_node_id, next_node_id, zone, state, held_at_slot, entered_zone_at FROM cart_segments WHERE cart_uuid = ?")) {
-                ps.setString(1, cartUuid);
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (!rs.next()) return Optional.empty();
-                    Map<String, Object> m = new HashMap<>();
-                    m.put("cart_uuid", rs.getString("cart_uuid"));
-                    m.put("destination_address", rs.getString("destination_address"));
-                    m.put("origin_station_id", rs.getString("origin_station_id"));
-                    m.put("current_node_id", rs.getString("current_node_id"));
-                    m.put("next_node_id", rs.getString("next_node_id"));
-                    m.put("zone", rs.getString("zone"));
-                    m.put("state", rs.getString("state"));
-                    m.put("held_at_slot", rs.getObject("held_at_slot"));
-                    m.put("entered_zone_at", rs.getLong("entered_zone_at"));
-                    return Optional.of(m);
-                }
+        return database.withConnection(conn -> find(conn, cartUuid));
+    }
+
+    /** Use when already holding a connection (e.g. inside runAsyncRead callback). */
+    public Optional<Map<String, Object>> find(Connection conn, String cartUuid) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+            "SELECT cart_uuid, destination_address, origin_station_id, current_node_id, next_node_id, zone, state, held_at_slot, entered_zone_at FROM cart_segments WHERE cart_uuid = ?")) {
+            ps.setString(1, cartUuid);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return Optional.empty();
+                Map<String, Object> m = new HashMap<>();
+                m.put("cart_uuid", rs.getString("cart_uuid"));
+                m.put("destination_address", rs.getString("destination_address"));
+                m.put("origin_station_id", rs.getString("origin_station_id"));
+                m.put("current_node_id", rs.getString("current_node_id"));
+                m.put("next_node_id", rs.getString("next_node_id"));
+                m.put("zone", rs.getString("zone"));
+                m.put("state", rs.getString("state"));
+                m.put("held_at_slot", rs.getObject("held_at_slot"));
+                m.put("entered_zone_at", rs.getLong("entered_zone_at"));
+                return Optional.of(m);
             }
-        });
+        }
     }
 
     /** Current destination address for the cart, or empty if none. */
@@ -165,14 +170,17 @@ public class CartRepository {
 
     /** All cart UUIDs currently in cart_segments. Used by stale-cart cleanup to find carts that no longer exist as entities. */
     public List<String> listAllCartUuids() {
-        return database.withConnection(conn -> {
-            List<String> list = new ArrayList<>();
-            try (PreparedStatement ps = conn.prepareStatement("SELECT cart_uuid FROM cart_segments");
-                 ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) list.add(rs.getString("cart_uuid"));
-            }
-            return list;
-        });
+        return database.withConnection(this::listAllCartUuids);
+    }
+
+    /** Use when already holding a connection (e.g. inside runAsyncRead callback). */
+    public List<String> listAllCartUuids(Connection conn) throws SQLException {
+        List<String> list = new ArrayList<>();
+        try (PreparedStatement ps = conn.prepareStatement("SELECT cart_uuid FROM cart_segments");
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) list.add(rs.getString("cart_uuid"));
+        }
+        return list;
     }
 
     /** Clears all cart state: cart_segments. Does not reset held counts. */

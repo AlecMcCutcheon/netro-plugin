@@ -17,12 +17,15 @@ import dev.netro.gui.RulesMainHolder;
 import dev.netro.routing.RoutingEngine;
 import dev.netro.util.AddressHelper;
 import dev.netro.util.DestinationResolver;
+import org.bukkit.Location;
 import org.bukkit.World;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.Minecart;
 import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.Vector;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -64,11 +67,62 @@ public class DetectorRailHandler {
     /** key: nodeId -> task that runs 5s after RELEASE was turned on; then double-check and clear or resume polling. */
     private final Map<String, BukkitTask> terminalPostReleaseTimeoutTasks = new ConcurrentHashMap<>();
 
-    /** Deferred rail state: apply when cart is within radius of each rail. key: cartUuid. */
+    /** Max block updates (bulbs + rails) per tick in apply step; rest run next tick(s) to smooth cost. */
+    private static final int BLOCK_UPDATES_PER_TICK = 4;
+    /** Ready hold: velocity correction is applied from CartListener when cart moves; we only schedule 1s then start polling (no separate velocity timer). */
+
+    /** Deferred rail state: apply only when cart is within radius of that rail (loop every N ticks). key: cartUuid. */
     private static final double DEFERRED_RAIL_STATE_RADIUS = 2.0;
     private static final long DEFERRED_RAIL_STATE_TIMEOUT_MS = 30_000;
-    private static final long DEFERRED_RAIL_STATE_INTERVAL_TICKS = 2;
+    /** How often the "cart near rail?" check runs; rails are applied only when cart is in range. */
+    private static final long DEFERRED_RAIL_STATE_INTERVAL_TICKS = 5;
     private final Map<String, DeferredRailStateTask> deferredRailStateTasks = new ConcurrentHashMap<>();
+
+    /** Rules by context (contextType|contextId|contextSide) to avoid repeated DB load per detector pass. */
+    private final Map<String, List<Rule>> ruleCache = new ConcurrentHashMap<>();
+
+    /** Reused per detector pass (main thread only); cleared at start of each run to avoid allocating 3 maps per cart. */
+    private final Map<String, TransferNode> nodeCacheReused = new LinkedHashMap<>();
+    private final Map<String, Station> stationCacheReused = new LinkedHashMap<>();
+    private final Map<String, String> destDisplayCacheReused = new HashMap<>();
+
+    /** Call when rules are created, updated, or deleted so the next detector pass sees fresh rules. */
+    public void invalidateRuleCache() {
+        ruleCache.clear();
+    }
+
+    /** Result of async read: cart data, first detector node's station id, and pre-fetched node/station maps for all detectors at this rail. */
+    private record DetectorInitialData(
+        Optional<Map<String, Object>> cartDataOpt,
+        String currentStationId,
+        Map<String, TransferNode> nodeMap,
+        Map<String, Station> stationMap
+    ) {
+        DetectorInitialData(Optional<Map<String, Object>> cartDataOpt, String currentStationId) {
+            this(cartDataOpt, currentStationId, new HashMap<>(), new HashMap<>());
+        }
+    }
+
+    /** Everything the main thread must apply after async detector run (no DB, no heavy logic). */
+    private record DetectorApplyResult(
+        List<BulbAction> bulbActions,
+        List<RailStateAction> railStateActions,
+        List<RailStateAction> deferredRailStateActions,
+        List<CruiseSpeedAction> cruiseSpeedActions,
+        String readyNodeId,
+        String titleToShow,
+        String subtitleToShow,
+        String unreachableOldDest,
+        boolean removeCart,
+        List<String> recheckCartUuids,
+        boolean ensureCartTaskRunning,
+        List<Runnable> mainThreadRunnables
+    ) {}
+
+    private List<Rule> getRulesCached(String contextType, String contextId, String contextSide) {
+        String key = contextType + "|" + contextId + "|" + (contextSide != null ? contextSide : "");
+        return ruleCache.computeIfAbsent(key, k -> ruleRepo.findByContext(contextType, contextId, contextSide));
+    }
 
     public DetectorRailHandler(NetroPlugin plugin) {
         this.plugin = plugin;
@@ -86,143 +140,207 @@ public class DetectorRailHandler {
 
     /**
      * Call when a cart has moved; (railX, railY, railZ) is the rail block the cart is on (or below).
-     * If detectors exist at this rail, handles ENTRY/READY/CLEAR and controller activation; returns true.
-     * Returns false if no detectors at this rail.
+     * All DB and decision logic runs async; main thread only does: read block/velocity for direction,
+     * then (after async) apply result (bulbs, rails, title, etc.). Deferred rail-state is only
+     * replaced when a detector returns a new non-empty list, not cancelled on every detector hit.
+     * Returns true so the caller can keep processing if needed.
      */
     public boolean onCartOnDetectorRail(World world, int railX, int railY, int railZ, Minecart cart) {
-        String worldName = world.getName();
-        List<Detector> detectors = detectorRepo.findByRail(worldName, railX, railY, railZ);
-        if (detectors.isEmpty()) return false;
-
+        final String worldName = world.getName();
         String cartUuid = cart.getUniqueId().toString();
         org.bukkit.block.Block railBlock = world.getBlockAt(railX, railY, railZ);
         org.bukkit.block.BlockFace cartCardinal = DirectionHelper.velocityAndRailToCardinal(cart.getVelocity(), railBlock);
-        boolean debug = plugin.isDebugEnabled();
+        final boolean debug = plugin.isDebugEnabled();
 
-        final double speedForDebug = cart.getVelocity().length();
-        final java.util.Optional<String> headingTowardStationId = resolveHeadingTowardStation(detectors, cartCardinal);
+        // Do not cancel deferred rail-state here: that would kill the task from a previous detector before rails are applied when the cart hits a later detector (e.g. terminal) that has no SET_RAIL_STATE. Replacement happens only in startDeferredRailStateTask when starting a new task.
 
-        plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
+        // All DB and logic off main thread. Main only applies the result in applyDetectorResult.
+        plugin.getDatabase().runAsyncRead(conn -> {
+            List<Detector> detectors = detectorRepo.findByRail(conn, worldName, railX, railY, railZ);
+            if (detectors.isEmpty()) return null;
+
+            Optional<Map<String, Object>> cartData = cartRepo.find(conn, cartUuid);
+            String currentStationId = null;
+            Map<String, TransferNode> nodeMap = new HashMap<>();
+            Map<String, Station> stationMap = new HashMap<>();
+            for (Detector d : detectors) {
+                if (d.getNodeId() == null) continue;
+                String nid = d.getNodeId();
+                if (nodeMap.containsKey(nid)) continue;
+                Optional<TransferNode> node = nodeRepo.findById(conn, nid);
+                if (node.isEmpty()) continue;
+                TransferNode n = node.get();
+                nodeMap.put(nid, n);
+                stationRepo.findById(conn, n.getStationId()).ifPresent(s -> stationMap.put(s.getId(), s));
+                if (currentStationId == null) currentStationId = n.getStationId();
+            }
+            Optional<String> headingTowardStationId = resolveHeadingTowardStation(detectors, cartCardinal, nodeMap, conn);
+            UnifiedCartSeenFlow.AsyncOut asyncOut = new UnifiedCartSeenFlow.AsyncOut();
+            unifiedCartSeenFlow.runWithWorldName(cartUuid, worldName, detectors, railX, railY, railZ, headingTowardStationId, cartData, Optional.ofNullable(currentStationId), asyncOut);
+            Optional<Map<String, Object>> cartDataOpt = cartData;
+            Optional<String> unreachableOldDest = (currentStationId != null && cartDataOpt.isPresent())
+                ? routing.handleUnreachableAndRedirectToNearestTerminal(cartUuid, currentStationId, cartDataOpt) : Optional.empty();
+
             List<BulbAction> bulbActions = new ArrayList<>();
             List<RailStateAction> railStateActions = new ArrayList<>();
             List<RailStateAction> deferredRailStateActions = new ArrayList<>();
             List<CruiseSpeedAction> cruiseSpeedActions = new ArrayList<>();
-
-            cancelDeferredRailStateForCart(cartUuid);
-
-            unifiedCartSeenFlow.run(cartUuid, world, cart, detectors, railX, railY, railZ, headingTowardStationId);
-
-            String currentStationId = detectors.stream()
-                .filter(d -> d.getNodeId() != null)
-                .findFirst()
-                .flatMap(d -> nodeRepo.findById(d.getNodeId()).map(TransferNode::getStationId))
-                .orElse(null);
-            if (currentStationId != null) {
-                Optional<String> unreachable = routing.handleUnreachableAndRedirectToNearestTerminal(cartUuid, currentStationId);
-                if (unreachable.isPresent()) {
-                    final String oldDest = unreachable.get();
-                    final World worldRef = world;
-                    plugin.getServer().getScheduler().runTask(plugin, () -> notifyUnreachableRedirect(worldRef, cartUuid, oldDest));
-                }
-            }
-
-            final String[] readyCenterNodeIdRef = new String[1];
+            List<Runnable> mainThreadRunnables = new ArrayList<>();
+            String[] readyCenterNodeIdRef = new String[1];
+            String[] titleRef = new String[2];
+            Map<String, TransferNode> nodeCacheReused = new LinkedHashMap<>(nodeMap);
+            Map<String, Station> stationCacheReused = new LinkedHashMap<>(stationMap);
+            Map<String, String> destDisplayCacheReused = new HashMap<>();
             for (Detector d : detectors) {
                 String dir = DirectionHelper.cardinalToDirectionLabel(d.getSignFacing(), cartCardinal);
-                if (debug) {
-                    String targetLabel = detectorTargetLabel(d);
-                    StringBuilder sb = new StringBuilder("[Netro detector] rail ").append(railX).append(",").append(railY).append(",").append(railZ)
-                        .append(" ").append(targetLabel).append(" dir=").append(dir)
-                        .append(" speed=").append(String.format("%.3f", speedForDebug))
-                        .append(" rule1=").append(d.getRule1Role()).append(d.getRule1Direction() != null ? ":" + d.getRule1Direction() : "");
-                    if (d.getRule2Role() != null) sb.append(" rule2=").append(d.getRule2Role()).append(d.getRule2Direction() != null ? ":" + d.getRule2Direction() : "");
-                    if (d.getRule3Role() != null) sb.append(" rule3=").append(d.getRule3Role()).append(d.getRule3Direction() != null ? ":" + d.getRule3Direction() : "");
-                    if (d.getRule4Role() != null) sb.append(" rule4=").append(d.getRule4Role()).append(d.getRule4Direction() != null ? ":" + d.getRule4Direction() : "");
-                    plugin.getLogger().info(sb.toString());
-                }
-
                 boolean m1 = ruleMatches(d.getRule1Role(), d.getRule1Direction(), dir);
-                logRuleMatch(debug, d, 1, d.getRule1Role(), d.getRule1Direction(), dir, m1);
-                if (m1) processRule(d, d.getRule1Role(), d.getRule1Direction(), dir, cartUuid, bulbActions, railStateActions, deferredRailStateActions, cruiseSpeedActions, debug, worldName, railX, railY, railZ, readyCenterNodeIdRef);
-                if (d.getRule2Role() != null) {
-                    boolean m2 = ruleMatches(d.getRule2Role(), d.getRule2Direction(), dir);
-                    logRuleMatch(debug, d, 2, d.getRule2Role(), d.getRule2Direction(), dir, m2);
-                    if (m2) processRule(d, d.getRule2Role(), d.getRule2Direction(), dir, cartUuid, bulbActions, railStateActions, deferredRailStateActions, cruiseSpeedActions, debug, worldName, railX, railY, railZ, readyCenterNodeIdRef);
-                }
-                if (d.getRule3Role() != null) {
-                    boolean m3 = ruleMatches(d.getRule3Role(), d.getRule3Direction(), dir);
-                    logRuleMatch(debug, d, 3, d.getRule3Role(), d.getRule3Direction(), dir, m3);
-                    if (m3) processRule(d, d.getRule3Role(), d.getRule3Direction(), dir, cartUuid, bulbActions, railStateActions, deferredRailStateActions, cruiseSpeedActions, debug, worldName, railX, railY, railZ, readyCenterNodeIdRef);
-                }
-                if (d.getRule4Role() != null) {
-                    boolean m4 = ruleMatches(d.getRule4Role(), d.getRule4Direction(), dir);
-                    logRuleMatch(debug, d, 4, d.getRule4Role(), d.getRule4Direction(), dir, m4);
-                    if (m4) processRule(d, d.getRule4Role(), d.getRule4Direction(), dir, cartUuid, bulbActions, railStateActions, deferredRailStateActions, cruiseSpeedActions, debug, worldName, railX, railY, railZ, readyCenterNodeIdRef);
-                }
+                if (m1) processRule(d, d.getRule1Role(), d.getRule1Direction(), dir, cartUuid, cartDataOpt, bulbActions, railStateActions, deferredRailStateActions, cruiseSpeedActions, debug, worldName, railX, railY, railZ, readyCenterNodeIdRef, titleRef, nodeCacheReused, stationCacheReused, destDisplayCacheReused, mainThreadRunnables);
+                if (d.getRule2Role() != null) { boolean m2 = ruleMatches(d.getRule2Role(), d.getRule2Direction(), dir); if (m2) processRule(d, d.getRule2Role(), d.getRule2Direction(), dir, cartUuid, cartDataOpt, bulbActions, railStateActions, deferredRailStateActions, cruiseSpeedActions, debug, worldName, railX, railY, railZ, readyCenterNodeIdRef, titleRef, nodeCacheReused, stationCacheReused, destDisplayCacheReused, mainThreadRunnables); }
+                if (d.getRule3Role() != null) { boolean m3 = ruleMatches(d.getRule3Role(), d.getRule3Direction(), dir); if (m3) processRule(d, d.getRule3Role(), d.getRule3Direction(), dir, cartUuid, cartDataOpt, bulbActions, railStateActions, deferredRailStateActions, cruiseSpeedActions, debug, worldName, railX, railY, railZ, readyCenterNodeIdRef, titleRef, nodeCacheReused, stationCacheReused, destDisplayCacheReused, mainThreadRunnables); }
+                if (d.getRule4Role() != null) { boolean m4 = ruleMatches(d.getRule4Role(), d.getRule4Direction(), dir); if (m4) processRule(d, d.getRule4Role(), d.getRule4Direction(), dir, cartUuid, cartDataOpt, bulbActions, railStateActions, deferredRailStateActions, cruiseSpeedActions, debug, worldName, railX, railY, railZ, readyCenterNodeIdRef, titleRef, nodeCacheReused, stationCacheReused, destDisplayCacheReused, mainThreadRunnables); }
                 bulbActions.add(new BulbAction(d.getWorld(), d.getX(), d.getY(), d.getZ(), true, DETECTOR_PULSE_MS));
             }
-
-            final List<RailStateAction> deferredCopy = new ArrayList<>();
-            if (!deferredRailStateActions.isEmpty()) {
-                for (RailStateAction r : deferredRailStateActions) deferredCopy.add(r.copy());
-            }
-
+            List<RailStateAction> deferredCopy = new ArrayList<>();
+            for (RailStateAction r : deferredRailStateActions) deferredCopy.add(r.copy());
             dedupeBulbActions(bulbActions);
-
-            final String cartUuidFinal = cartUuid;
-            final String readyNodeId = readyCenterNodeIdRef[0];
-            final List<CruiseSpeedAction> cruiseSpeedActionsFinal = cruiseSpeedActions;
-            plugin.getServer().getScheduler().runTask(plugin, () -> {
-                World w = plugin.getServer().getWorld(worldName);
-                java.util.UUID uuid;
-                try {
-                    uuid = java.util.UUID.fromString(cartUuidFinal);
-                } catch (IllegalArgumentException e) {
-                    uuid = null;
-                }
-                Minecart resolvedCart = (w != null && uuid != null) ? findMinecartByUuid(w, uuid) : null;
-
-                for (CruiseSpeedAction a : cruiseSpeedActionsFinal) {
-                    plugin.getCartControllerGuiListener().applyRuleCruiseSpeed(a.cartUuid, a.magnitude);
-                }
-                for (BulbAction a : bulbActions) {
-                    CopperBulbHelper.setPowered(plugin.getServer().getWorld(a.world), a.x, a.y, a.z, a.on);
-                    if (a.pulseMs > 0) {
-                        plugin.getServer().getScheduler().runTaskLater(plugin, () ->
-                            CopperBulbHelper.setPowered(plugin.getServer().getWorld(a.world), a.x, a.y, a.z, false), a.pulseMs / 50);
-                    }
-                }
-                for (RailStateAction r : railStateActions) {
-                    org.bukkit.World ww = plugin.getServer().getWorld(r.world);
-                    if (ww == null) continue;
-                    org.bukkit.block.Block block = ww.getBlockAt(r.x, r.y, r.z);
-                    if (block.getBlockData() instanceof org.bukkit.block.data.Rail railData) {
-                        try {
-                            railData.setShape(org.bukkit.block.data.Rail.Shape.valueOf(r.shapeName));
-                            block.setBlockData(railData);
-                        } catch (IllegalArgumentException ignored) { }
-                    }
-                }
-
-                if (readyNodeId != null && resolvedCart != null && resolvedCart.isValid()) {
-                    runTerminalReadyCartCenterWithCart(resolvedCart, readyNodeId, cartUuidFinal, worldName, railX, railY, railZ);
-                }
-                if (!deferredCopy.isEmpty()) {
-                    startDeferredRailStateTask(cartUuidFinal, deferredCopy, resolvedCart);
-                }
-            });
-        });
+            return new DetectorApplyResult(bulbActions, railStateActions, deferredCopy, cruiseSpeedActions, readyCenterNodeIdRef[0], titleRef[0], titleRef[1], unreachableOldDest.orElse(null), asyncOut.removeCart, new ArrayList<>(asyncOut.recheckCartUuids), asyncOut.ensureCartTaskRunning, mainThreadRunnables);
+        }, result -> plugin.getServer().getScheduler().runTask(plugin, () -> {
+            if (result != null) applyDetectorResult(cartUuid, world, worldName, railX, railY, railZ, result, cart);
+        }));
         return true;
     }
 
-    /** Human-readable target for detector debug: "node=Station:Node (transfer|terminal)". */
+    /**
+     * Apply a DetectorApplyResult on the main thread. No DB.
+     * Light work (recheck, mainThreadRunnables, etc.) runs this tick; block updates, title, ready/deferred
+     * run next tick to avoid transfer/terminal lag spike. cartRef from detector event used when valid to skip entity lookup.
+     */
+    private void applyDetectorResult(String cartUuid, World world, String worldName, int railX, int railY, int railZ, DetectorApplyResult result, Minecart cartRef) {
+        if (result == null) return;
+        World w = (world != null && world.getName().equals(worldName)) ? world : plugin.getServer().getWorld(worldName);
+        java.util.UUID uuid;
+        try { uuid = java.util.UUID.fromString(cartUuid); } catch (IllegalArgumentException e) { uuid = null; }
+        Minecart resolvedCart = (cartRef != null && cartRef.isValid()) ? cartRef : (w != null && uuid != null ? findMinecartByUuidNear(w, uuid, railX, railY, railZ, 3) : null);
+        if (result.removeCart() && resolvedCart != null && resolvedCart.isValid()) {
+            resolvedCart.remove();
+            resolvedCart = null;
+        }
+        for (String u : result.recheckCartUuids()) recheckTerminalReleaseForCart(u);
+        if (result.ensureCartTaskRunning() && plugin.getChunkLoadService() != null) plugin.getChunkLoadService().ensureCartTaskRunning();
+        if (result.unreachableOldDest() != null) notifyUnreachableRedirect(w != null ? w : plugin.getServer().getWorld(worldName), cartUuid, result.unreachableOldDest());
+        for (Runnable r : result.mainThreadRunnables()) r.run();
+
+        final World wFinal = w;
+        final Minecart resolvedForDeferred = resolvedCart;
+        plugin.getServer().getScheduler().runTaskLater(plugin, () -> applyStep1Rails(cartUuid, wFinal, worldName, railX, railY, railZ, result, resolvedForDeferred), 1L);
+    }
+
+    /** Step 1 (tick+1): rail state loop only; then schedule step 2 one tick later. */
+    private void applyStep1Rails(String cartUuid, World w, String worldName, int railX, int railY, int railZ, DetectorApplyResult result, Minecart resolvedCartRef) {
+        if (result == null) return;
+        World wResolved = (w != null && w.getName().equals(worldName)) ? w : plugin.getServer().getWorld(worldName);
+        for (RailStateAction r : result.railStateActions()) {
+            org.bukkit.World rw = (wResolved != null && r.world.equals(worldName)) ? wResolved : plugin.getServer().getWorld(r.world);
+            if (rw == null) continue;
+            org.bukkit.block.Block block = rw.getBlockAt(r.x, r.y, r.z);
+            if (!(block.getBlockData() instanceof org.bukkit.block.data.Rail railData)) continue;
+            org.bukkit.block.data.Rail.Shape desired;
+            try { desired = org.bukkit.block.data.Rail.Shape.valueOf(r.shapeName); } catch (IllegalArgumentException e) { continue; }
+            if (railData.getShape() != desired) {
+                railData.setShape(desired);
+                block.setBlockData(railData);
+            }
+        }
+        plugin.getServer().getScheduler().runTaskLater(plugin, () -> applyStep2ReadyCenter(cartUuid, wResolved, worldName, railX, railY, railZ, result, resolvedCartRef), 1L);
+    }
+
+    /** Step 2 (tick+2): ready center only; then schedule step 3 one tick later. */
+    private void applyStep2ReadyCenter(String cartUuid, World w, String worldName, int railX, int railY, int railZ, DetectorApplyResult result, Minecart resolvedCartRef) {
+        if (result == null) return;
+        Minecart resolvedCart = resolveCart(cartUuid, w, worldName, railX, railY, railZ, resolvedCartRef);
+        if (result.readyNodeId() != null && resolvedCart != null && resolvedCart.isValid()) runTerminalReadyCartCenterWithCart(resolvedCart, result.readyNodeId(), cartUuid, worldName, railX, railY, railZ);
+        plugin.getServer().getScheduler().runTaskLater(plugin, () -> applyStep3DeferredRail(cartUuid, w, worldName, railX, railY, railZ, result, resolvedCart), 1L);
+    }
+
+    /** Step 3 (tick+3): deferred rail task only; then schedule step 4 one tick later. */
+    private void applyStep3DeferredRail(String cartUuid, World w, String worldName, int railX, int railY, int railZ, DetectorApplyResult result, Minecart resolvedCartRef) {
+        if (result == null) return;
+        Minecart resolvedCart = resolveCart(cartUuid, w, worldName, railX, railY, railZ, resolvedCartRef);
+        if (!result.deferredRailStateActions().isEmpty()) startDeferredRailStateTask(cartUuid, result.deferredRailStateActions(), resolvedCart);
+        plugin.getServer().getScheduler().runTaskLater(plugin, () -> applyStep4Title(cartUuid, w, worldName, railX, railY, railZ, result, resolvedCart), 1L);
+    }
+
+    /** Step 4 (tick+4): title only; then schedule step 5 one tick later. */
+    private void applyStep4Title(String cartUuid, World w, String worldName, int railX, int railY, int railZ, DetectorApplyResult result, Minecart resolvedCartRef) {
+        if (result == null) return;
+        Minecart resolvedCart = resolveCart(cartUuid, w, worldName, railX, railY, railZ, resolvedCartRef);
+        String titleToShow = result.titleToShow();
+        String subtitleToShow = result.subtitleToShow();
+        if ((titleToShow != null || subtitleToShow != null) && resolvedCart != null && resolvedCart.isValid() && !resolvedCart.getPassengers().isEmpty() && resolvedCart.getPassengers().get(0) instanceof org.bukkit.entity.Player player) {
+            if (plugin.isTitleMessagesEnabled(player)) player.sendTitle(titleToShow != null ? titleToShow : "", subtitleToShow != null ? subtitleToShow : "", 10, 70, 20);
+        }
+        plugin.getServer().getScheduler().runTaskLater(plugin, () -> applyStep5Cruise(cartUuid, w, worldName, result), 1L);
+    }
+
+    /** Step 5 (tick+5): cruise only; then schedule step 6 one tick later. */
+    private void applyStep5Cruise(String cartUuid, World w, String worldName, DetectorApplyResult result) {
+        if (result == null) return;
+        World wResolved = (w != null && w.getName().equals(worldName)) ? w : plugin.getServer().getWorld(worldName);
+        for (CruiseSpeedAction a : result.cruiseSpeedActions()) plugin.getCartControllerGuiListener().applyRuleCruiseSpeed(a.cartUuid, a.magnitude);
+        plugin.getServer().getScheduler().runTaskLater(plugin, () -> applyStep6Bulbs(wResolved, worldName, result), 1L);
+    }
+
+    /** Step 6 (tick+6): bulbs only. */
+    private void applyStep6Bulbs(World w, String worldName, DetectorApplyResult result) {
+        if (result == null) return;
+        scheduleBlockUpdatesSpread(result.bulbActions(), w, worldName);
+    }
+
+    private Minecart resolveCart(String cartUuid, World w, String worldName, int railX, int railY, int railZ, Minecart ref) {
+        if (ref != null && ref.isValid()) return ref;
+        java.util.UUID uuid;
+        try { uuid = java.util.UUID.fromString(cartUuid); } catch (IllegalArgumentException e) { return null; }
+        World wResolved = (w != null && w.getName().equals(worldName)) ? w : plugin.getServer().getWorld(worldName);
+        return (wResolved != null && uuid != null) ? findMinecartByUuidNear(wResolved, uuid, railX, railY, railZ, 3) : null;
+    }
+
+    /** Apply bulb updates in batches of BLOCK_UPDATES_PER_TICK per tick to avoid spikes. Rail states are applied immediately so transfer nodes set rails before the cart passes. */
+    private void scheduleBlockUpdatesSpread(List<BulbAction> bulbActions, World w, String worldName) {
+        applyBulbBatch(bulbActions, 0, w, worldName);
+    }
+
+    private void applyBulbBatch(List<BulbAction> bulbActions, int fromIdx, World w, String worldName) {
+        int toIdx = Math.min(fromIdx + BLOCK_UPDATES_PER_TICK, bulbActions.size());
+        for (int i = fromIdx; i < toIdx; i++) {
+            BulbAction a = bulbActions.get(i);
+            org.bukkit.World bulbWorld = (w != null && a.world.equals(worldName)) ? w : plugin.getServer().getWorld(a.world);
+            if (bulbWorld != null) {
+                CopperBulbHelper.setPowered(bulbWorld, a.x, a.y, a.z, a.on);
+                if (a.pulseMs > 0) {
+                    final org.bukkit.World pulseWorld = bulbWorld;
+                    plugin.getServer().getScheduler().runTaskLater(plugin, () -> CopperBulbHelper.setPowered(pulseWorld, a.x, a.y, a.z, false), a.pulseMs / 50);
+                }
+            }
+        }
+        if (toIdx < bulbActions.size()) {
+            final int nextFrom = toIdx;
+            plugin.getServer().getScheduler().runTaskLater(plugin, () -> applyBulbBatch(bulbActions, nextFrom, w, worldName), 1L);
+        }
+    }
+
+    /** Human-readable target for detector debug: "node=Station:Node (transfer|terminal)". Uses pre-filled caches when present to avoid DB on hot path. */
     private String detectorTargetLabel(Detector d) {
         if (d.getNodeId() != null) {
-            Optional<TransferNode> node = nodeRepo.findById(d.getNodeId());
-            if (node.isPresent()) {
-                String stName = stationRepo.findById(node.get().getStationId()).map(Station::getName).orElse("?");
-                String kind = node.get().isTerminal() ? "terminal" : "transfer";
-                return "node=" + stName + ":" + node.get().getName() + " (" + kind + ")";
+            TransferNode node = nodeCacheReused.get(d.getNodeId());
+            if (node == null) {
+                Optional<TransferNode> opt = nodeRepo.findById(d.getNodeId());
+                node = opt.orElse(null);
+            }
+            if (node != null) {
+                Station st = stationCacheReused.get(node.getStationId());
+                String stName = st != null ? st.getName() : (stationRepo.findById(node.getStationId()).map(Station::getName).orElse("?"));
+                String kind = node.isTerminal() ? "terminal" : "transfer";
+                return "node=" + stName + ":" + node.getName() + " (" + kind + ")";
             }
             return "node=" + d.getNodeId();
         }
@@ -249,16 +367,7 @@ public class DetectorRailHandler {
         plugin.registerReadyHold(cartUuid, railWorldName, cx, cy, cz);
         applyReadyHoldVelocityCorrection(cart, cx, cy, cz);
         final Minecart cartRef = cart;
-        final BukkitTask[] taskRef = new BukkitTask[1];
-        taskRef[0] = plugin.getServer().getScheduler().runTaskTimer(plugin, () -> {
-            if (!cartRef.isValid()) {
-                if (taskRef[0] != null) taskRef[0].cancel();
-                return;
-            }
-            applyReadyHoldVelocityCorrection(cartRef, cx, cy, cz);
-        }, 1, 1);
         plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
-            if (taskRef[0] != null) taskRef[0].cancel();
             plugin.removeReadyHold(cartUuid);
             startTerminalPolling(nodeId, cartUuid, railWorldName, railX, railY, railZ, cartRef);
         }, 21);
@@ -291,6 +400,16 @@ public class DetectorRailHandler {
         return null;
     }
 
+    /** Prefer when the cart is known to be near (e.g. just triggered detector at railX, railY, railZ). Uses nearby entities then full scan fallback. */
+    private static Minecart findMinecartByUuidNear(World world, java.util.UUID uuid, int centerX, int centerY, int centerZ, int radius) {
+        if (world == null || uuid == null) return null;
+        org.bukkit.Location center = new org.bukkit.Location(world, centerX + 0.5, centerY + 0.5, centerZ + 0.5);
+        for (org.bukkit.entity.Entity e : world.getNearbyEntities(center, radius, radius, radius)) {
+            if (e instanceof Minecart m && m.getUniqueId().equals(uuid)) return m;
+        }
+        return findMinecartByUuid(world, uuid);
+    }
+
     /** Called on main thread when a cart's destination was unreachable and has been redirected to nearest terminal. */
     private void notifyUnreachableRedirect(World world, String cartUuid, String oldDest) {
         String destDisplay = RulesMainHolder.formatDestinationId(oldDest, stationRepo, nodeRepo);
@@ -305,17 +424,23 @@ public class DetectorRailHandler {
             plugin.getServer().broadcastMessage("[Netro] Cart had no route to " + destDisplay + "; redirected to nearest terminal.");
             return;
         }
+        Optional<String> newDest = cartRepo.find(cartUuid).map(c -> (String) c.get("destination_address"));
+        String subtitle = newDest.filter(s -> s != null && !s.isEmpty())
+            .map(s -> "Redirected to " + RulesMainHolder.formatDestinationId(s, stationRepo, nodeRepo))
+            .orElse("Redirected to nearest terminal.");
         if (!cart.getPassengers().isEmpty() && cart.getPassengers().get(0) instanceof org.bukkit.entity.Player player) {
-            player.sendTitle("No route to destination", destDisplay, 10, 70, 20);
+            if (plugin.isTitleMessagesEnabled(player)) {
+                player.sendTitle("No route to destination", subtitle, 10, 70, 20);
+            }
         } else {
-            plugin.getServer().broadcastMessage("[Netro] Cart has no route to " + destDisplay + "; redirected to nearest terminal.");
+            plugin.getServer().broadcastMessage("[Netro] Cart has no route to " + destDisplay + "; " + subtitle);
         }
     }
 
     /** Distance within which the cart is considered at center; then we set velocity to zero. */
     private static final double READY_CENTER_TOLERANCE = 0.15;
     /** Max speed when correcting toward center (velocity-based, works with player in cart). */
-    private static final double READY_CORRECTION_SPEED = 0.25;
+    private static final double READY_CORRECTION_SPEED = 0.5;
 
     /**
      * Move the cart toward (cx,cy,cz) using velocity only: if not at center, set velocity toward center;
@@ -331,7 +456,7 @@ public class DetectorRailHandler {
             cart.setVelocity(new Vector(0, 0, 0));
             return;
         }
-        double speed = Math.min(dist * 0.5, READY_CORRECTION_SPEED);
+        double speed = Math.min(dist * 0.9, READY_CORRECTION_SPEED);
         cart.setVelocity(new Vector(dx / dist * speed, dy / dist * speed, dz / dist * speed));
     }
 
@@ -364,27 +489,40 @@ public class DetectorRailHandler {
      * the paired node's station. Returns that station id so the unified flow can set destination to a terminal there.
      */
     private Optional<String> resolveHeadingTowardStation(List<Detector> detectors, org.bukkit.block.BlockFace cartCardinal) {
-        for (Detector d : detectors) {
-            if (d.getNodeId() == null) continue;
-            Optional<TransferNode> nodeOpt = nodeRepo.findById(d.getNodeId());
-            if (nodeOpt.isEmpty() || nodeOpt.get().isTerminal()) continue;
-            TransferNode node = nodeOpt.get();
-            if (node.getPairedNodeId() == null) continue;
-            String dir = DirectionHelper.cardinalToDirectionLabel(d.getSignFacing(), cartCardinal);
-            boolean clearFires = ("CLEAR".equals(d.getRule1Role()) && ruleMatches(d.getRule1Role(), d.getRule1Direction(), dir))
-                || (d.getRule2Role() != null && "CLEAR".equals(d.getRule2Role()) && ruleMatches(d.getRule2Role(), d.getRule2Direction(), dir))
-                || (d.getRule3Role() != null && "CLEAR".equals(d.getRule3Role()) && ruleMatches(d.getRule3Role(), d.getRule3Direction(), dir))
-                || (d.getRule4Role() != null && "CLEAR".equals(d.getRule4Role()) && ruleMatches(d.getRule4Role(), d.getRule4Direction(), dir));
-            if (clearFires) {
-                Optional<TransferNode> paired = nodeRepo.findById(node.getPairedNodeId());
-                if (paired.isPresent()) return Optional.of(paired.get().getStationId());
-            }
-        }
-        return Optional.empty();
+        return resolveHeadingTowardStation(detectors, cartCardinal, null, null);
     }
 
-    private void processRule(Detector d, String role, String direction, String cartDir, String cartUuid, List<BulbAction> bulbActions, List<RailStateAction> railStateActions, List<RailStateAction> deferredRailStateActions, List<CruiseSpeedAction> cruiseSpeedActions, boolean debug,
-            String railWorldName, int railX, int railY, int railZ, String[] readyCenterNodeIdRef) {
+    /** Async variant: use nodeMap for nodes, conn for paired lookup. */
+    private Optional<String> resolveHeadingTowardStation(List<Detector> detectors, org.bukkit.block.BlockFace cartCardinal, Map<String, TransferNode> nodeMap, java.sql.Connection conn) {
+        try {
+            for (Detector d : detectors) {
+                if (d.getNodeId() == null) continue;
+                Optional<TransferNode> nodeOpt = (nodeMap != null && conn != null)
+                    ? (nodeMap.containsKey(d.getNodeId()) ? Optional.of(nodeMap.get(d.getNodeId())) : nodeRepo.findById(conn, d.getNodeId()))
+                    : nodeRepo.findById(d.getNodeId());
+                if (nodeOpt.isEmpty() || nodeOpt.get().isTerminal()) continue;
+                TransferNode node = nodeOpt.get();
+                if (node.getPairedNodeId() == null) continue;
+                String dir = DirectionHelper.cardinalToDirectionLabel(d.getSignFacing(), cartCardinal);
+                boolean clearFires = ("CLEAR".equals(d.getRule1Role()) && ruleMatches(d.getRule1Role(), d.getRule1Direction(), dir))
+                    || (d.getRule2Role() != null && "CLEAR".equals(d.getRule2Role()) && ruleMatches(d.getRule2Role(), d.getRule2Direction(), dir))
+                    || (d.getRule3Role() != null && "CLEAR".equals(d.getRule3Role()) && ruleMatches(d.getRule3Role(), d.getRule3Direction(), dir))
+                    || (d.getRule4Role() != null && "CLEAR".equals(d.getRule4Role()) && ruleMatches(d.getRule4Role(), d.getRule4Direction(), dir));
+                if (clearFires) {
+                    Optional<TransferNode> paired = (conn != null) ? nodeRepo.findById(conn, node.getPairedNodeId()) : nodeRepo.findById(node.getPairedNodeId());
+                    if (paired.isPresent()) return Optional.of(paired.get().getStationId());
+                }
+            }
+            return Optional.empty();
+        } catch (java.sql.SQLException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private void processRule(Detector d, String role, String direction, String cartDir, String cartUuid, Optional<Map<String, Object>> cartDataOpt, List<BulbAction> bulbActions, List<RailStateAction> railStateActions, List<RailStateAction> deferredRailStateActions, List<CruiseSpeedAction> cruiseSpeedActions, boolean debug,
+            String railWorldName, int railX, int railY, int railZ, String[] readyCenterNodeIdRef, String[] titleRef,
+            Map<String, TransferNode> nodeCache, Map<String, Station> stationCache, Map<String, String> destDisplayCache,
+            List<Runnable> mainThreadActions) {
         String nodeId = d.getNodeId();
         if (debug) plugin.getLogger().info("[Netro detector] processRule node=" + (nodeId != null ? nodeId : "null") + " role=" + role + " cartDir=" + cartDir);
 
@@ -402,12 +540,9 @@ public class DetectorRailHandler {
             return;
         }
 
-        if ("ENTRY".equals(role) || "READY".equals(role) || "CLEAR".equals(role)) {
-            String substitutedDest = applyBlockedRulesIfNeeded(d, cartUuid, cartDir);
-            if ("ENTRY".equals(role) || "CLEAR".equals(role)) {
-                if (debug) plugin.getLogger().info("[Netro detector] evaluating rules node=" + nodeId + " role=" + role);
-                evaluateRuleEngine(d, role, cartUuid, bulbActions, railStateActions, deferredRailStateActions, cruiseSpeedActions, railWorldName, cartDir, substitutedDest);
-            }
+        if ("ENTRY".equals(role) || "CLEAR".equals(role)) {
+            if (debug) plugin.getLogger().info("[Netro detector] evaluating rules node=" + nodeId + " role=" + role);
+            evaluateRuleEngine(d, role, cartUuid, cartDataOpt, bulbActions, railStateActions, deferredRailStateActions, cruiseSpeedActions, railWorldName, cartDir, null, nodeCache, stationCache, destDisplayCache, debug);
         }
 
         // ENTRY at a node: no segment occupancy (no collision detection).
@@ -417,7 +552,8 @@ public class DetectorRailHandler {
         }
 
         if ("READY".equals(role) && nodeId != null) {
-            boolean isTerminal = nodeRepo.findById(nodeId).map(TransferNode::isTerminal).orElse(false);
+            TransferNode nodeForTerminal = nodeCache.computeIfAbsent(nodeId, id -> nodeRepo.findById(id).orElse(null));
+            boolean isTerminal = nodeForTerminal != null && nodeForTerminal.isTerminal();
             if (!isTerminal) return;
             String zone = "node:" + nodeId;
             // Only one cart held per terminal: clear any other cart previously held at this node
@@ -426,24 +562,35 @@ public class DetectorRailHandler {
             }
             heldCountRepo.setHeldCount(nodeId, 1);
             cartRepo.setHeld(cartUuid, zone, 0);
-            if (plugin.getChunkLoadService() != null) {
-                plugin.getChunkLoadService().ensureCartTaskRunning();
+            final String nid = nodeId;
+            if (mainThreadActions != null) {
+                mainThreadActions.add(() -> {
+                    if (plugin.getChunkLoadService() != null) plugin.getChunkLoadService().ensureCartTaskRunning();
+                    cancelTerminalTimeout(nid);
+                    cancelTerminalPolling(nid);
+                    cancelPostReleaseTimeout(nid);
+                    BukkitTask task = plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+                        terminalTimeoutTasks.remove(nid);
+                        doubleCheckCartGoneAndClearOrResumePolling(nid);
+                    }, TERMINAL_HELD_TIMEOUT_TICKS);
+                    terminalTimeoutTasks.put(nid, task);
+                });
+            } else {
+                if (plugin.getChunkLoadService() != null) plugin.getChunkLoadService().ensureCartTaskRunning();
+                cancelTerminalTimeout(nodeId);
+                cancelTerminalPolling(nodeId);
+                cancelPostReleaseTimeout(nodeId);
+                BukkitTask task = plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+                    terminalTimeoutTasks.remove(nodeId);
+                    doubleCheckCartGoneAndClearOrResumePolling(nodeId);
+                }, TERMINAL_HELD_TIMEOUT_TICKS);
+                terminalTimeoutTasks.put(nodeId, task);
             }
-            cancelTerminalTimeout(nodeId);
-            cancelTerminalPolling(nodeId);
-            cancelPostReleaseTimeout(nodeId);
-            BukkitTask task = plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
-                terminalTimeoutTasks.remove(nodeId);
-                doubleCheckCartGoneAndClearOrResumePolling(nodeId);
-            }, TERMINAL_HELD_TIMEOUT_TICKS);
-            terminalTimeoutTasks.put(nodeId, task);
-            Optional<TransferNode> nodeOpt = nodeRepo.findById(nodeId);
-            TransferNode node = nodeOpt.orElse(null);
+            TransferNode node = nodeCache.computeIfAbsent(nodeId, id -> nodeRepo.findById(id).orElse(null));
             String pairedId = node != null ? node.getPairedNodeId() : null;
-            String terminalAddr = node != null ? node.terminalAddress(
-                stationRepo.findById(node.getStationId()).map(Station::getAddress).orElse(null)) : null;
-            Optional<String> cartDestOpt = cartRepo.find(cartUuid).map(cartData -> (String) cartData.get("destination_address"));
-            String cartDest = cartDestOpt.orElse(null);
+            Station station = node != null ? stationCache.computeIfAbsent(node.getStationId(), id -> stationRepo.findById(id).orElse(null)) : null;
+            String terminalAddr = node != null && station != null ? node.terminalAddress(station.getAddress()) : null;
+            String cartDest = cartDataOpt.flatMap(m -> Optional.ofNullable((String) m.get("destination_address"))).orElse(null);
             if (terminalAddr != null && destIsForThisTerminal(cartDest, terminalAddr)) {
                 cartRepo.clearDestination(cartUuid);
             }
@@ -456,21 +603,79 @@ public class DetectorRailHandler {
                 && (pairedId == null || routing.canDispatch(cartUuid, nodeId, pairedId).canGo());
             if (releaseOn) {
                 setNodeControllers(bulbActions, nodeId, "RELEASE", null, true);
-                schedulePostReleaseTimeout(nodeId);
+                if (mainThreadActions != null) {
+                    mainThreadActions.add(() -> schedulePostReleaseTimeout(nodeId));
+                } else {
+                    schedulePostReleaseTimeout(nodeId);
+                }
+            }
+            String stationName = station != null ? station.getName() : "?";
+            String terminalName = node != null ? node.getName() : "?";
+            titleRef[0] = "Now arriving";
+            titleRef[1] = stationName + ", Terminal " + terminalName;
+            if (releaseOn) {
+                titleRef[0] = "Now departing";
+                titleRef[1] = cartDest != null && !cartDest.isEmpty()
+                    ? "Final destination: " + destDisplayCache.computeIfAbsent(cartDest, k -> RulesMainHolder.formatDestinationId(k, stationRepo, nodeRepo))
+                    : "";
             }
             if (debug) plugin.getLogger().info("[Netro detector] READY terminal node=" + nodeId + " held=1 RELEASE=" + releaseOn);
-            readyCenterNodeIdRef[0] = nodeId;
+            if (!releaseOn) readyCenterNodeIdRef[0] = nodeId; // do not hold/center when releasing immediately
             return;
         }
 
         if ("CLEAR".equals(role) && nodeId != null) {
-            Optional<TransferNode> nodeOpt = nodeRepo.findById(nodeId);
-            boolean isTerminal = nodeOpt.map(TransferNode::isTerminal).orElse(false);
+            TransferNode node = nodeCache.computeIfAbsent(nodeId, id -> nodeRepo.findById(id).orElse(null));
+            boolean isTerminal = node != null && node.isTerminal();
+            String cartDest = cartDataOpt.flatMap(m -> Optional.ofNullable((String) m.get("destination_address"))).orElse(null);
             if (isTerminal) {
-                cancelTerminalTimeout(nodeId);
-                cancelTerminalPolling(nodeId);
-                cancelPostReleaseTimeout(nodeId);
-                plugin.getServer().getScheduler().runTask(plugin, () -> doubleCheckCartGoneAndClearOrResumePolling(nodeId));
+                titleRef[0] = "Now departing";
+                titleRef[1] = cartDest != null && !cartDest.isEmpty()
+                    ? "Final destination: " + destDisplayCache.computeIfAbsent(cartDest, k -> RulesMainHolder.formatDestinationId(k, stationRepo, nodeRepo))
+                    : "";
+            } else {
+                String fromStationId = node != null ? node.getStationId() : null;
+                if (fromStationId != null && cartDest != null && !cartDest.isEmpty()) {
+                    Optional<String> nextHopOpt = routing.resolveNextHopNode(fromStationId, cartDest);
+                    Optional<String> destStationIdOpt = resolveDestinationStationId(cartDest);
+                    boolean titleSet = false;
+                    String nextNodeId = nextHopOpt.orElse(null);
+                    TransferNode nextNode = nextNodeId != null ? nodeCache.computeIfAbsent(nextNodeId, id -> nodeRepo.findById(id).orElse(null)) : null;
+                    if (nextNode != null && !nextNode.getStationId().equals(fromStationId)) {
+                        String nextStationId = nextNode.getStationId();
+                        Station fromStation = stationCache.computeIfAbsent(fromStationId, id -> stationRepo.findById(id).orElse(null));
+                        Station toStation = stationCache.computeIfAbsent(nextStationId, id -> stationRepo.findById(id).orElse(null));
+                        if (fromStation != null && toStation != null) {
+                            titleRef[0] = "Leaving";
+                            titleRef[1] = fromStation.getName() + " → " + toStation.getName();
+                            titleSet = true;
+                        }
+                    }
+                    if (!titleSet && destStationIdOpt.isPresent() && !destStationIdOpt.get().equals(fromStationId)) {
+                        Station fromStation = stationCache.computeIfAbsent(fromStationId, id -> stationRepo.findById(id).orElse(null));
+                        Station toStation = stationCache.computeIfAbsent(destStationIdOpt.get(), id -> stationRepo.findById(id).orElse(null));
+                        if (fromStation != null && toStation != null) {
+                            titleRef[0] = "Leaving";
+                            titleRef[1] = fromStation.getName() + " → " + toStation.getName();
+                        }
+                    }
+                }
+            }
+            if (isTerminal) {
+                final String clearNodeId = nodeId;
+                if (mainThreadActions != null) {
+                    mainThreadActions.add(() -> {
+                        cancelTerminalTimeout(clearNodeId);
+                        cancelTerminalPolling(clearNodeId);
+                        cancelPostReleaseTimeout(clearNodeId);
+                        plugin.getServer().getScheduler().runTask(plugin, () -> doubleCheckCartGoneAndClearOrResumePolling(clearNodeId));
+                    });
+                } else {
+                    cancelTerminalTimeout(nodeId);
+                    cancelTerminalPolling(nodeId);
+                    cancelPostReleaseTimeout(nodeId);
+                    plugin.getServer().getScheduler().runTask(plugin, () -> doubleCheckCartGoneAndClearOrResumePolling(nodeId));
+                }
             }
             clearPlusControllersNode(bulbActions, nodeId);
             turnOffAllReleaseNode(bulbActions, nodeId);
@@ -478,106 +683,53 @@ public class DetectorRailHandler {
         }
     }
 
-    /**
-     * If the cart's next hop is blocked (e.g. terminal full), returns a substituted destination to pass to normal rules.
-     * Does not change the cart's stored destination; the substitute is used only for this rule evaluation so the cart is "temporarily rerouted".
-     * If a BLOCKED rule exists for this hop, returns its action_data; else applies default policy: available terminal at current station,
-     * else at another station, else another transfer node at current station that isn't occupied. Returns null when not blocked or no substitute.
-     */
-    private String applyBlockedRulesIfNeeded(Detector d, String cartUuid, String cartDir) {
-        String nodeId = d.getNodeId();
-        if (nodeId == null) return null;
-        String cartDest = cartRepo.find(cartUuid).map(c -> (String) c.get("destination_address")).orElse(null);
-        if (cartDest == null || cartDest.isEmpty()) return null;
-
-        Optional<TransferNode> nodeOpt = nodeRepo.findById(nodeId);
-        String fromStationId = nodeOpt.map(TransferNode::getStationId).orElse(null);
-        if (fromStationId == null) return null;
-        Optional<String> nextHopNodeIdOpt = routing.resolveNextHopNode(fromStationId, cartDest);
-        if (nextHopNodeIdOpt.isEmpty()) return null;
-        String nextHopNodeId = nextHopNodeIdOpt.get();
-        String fromNodeId = nodeId;
-        if (routing.canDispatch(cartUuid, fromNodeId, nextHopNodeId).canGo()) return null;
-
-        String contextType = nodeRepo.findById(nodeId).map(TransferNode::isTerminal).orElse(false) ? Rule.CONTEXT_TERMINAL : Rule.CONTEXT_TRANSFER;
-        String contextId = nodeId;
-        String contextSide = null;
-        String destForRules = nodeIdToDestinationId(nextHopNodeId).orElse(cartDest);
-
-        List<Rule> rules = ruleRepo.findByContext(contextType, contextId, contextSide);
-        for (Rule rule : rules) {
-            if (!Rule.TRIGGER_BLOCKED.equals(rule.getTriggerType())) continue;
-            if (!Rule.ACTION_SET_DESTINATION.equals(rule.getActionType()) || rule.getActionData() == null || rule.getActionData().isEmpty()) continue;
-            if (!destinationMatchesForRule(destForRules, rule.getDestinationId())) continue;
-            if (plugin.isDebugEnabled()) {
-                plugin.getLogger().info("[Netro rule] BLOCKED hop=" + formatDestForLog(destForRules) + " → substitute to " + formatDestForLog(rule.getActionData()));
-            }
-            return rule.getActionData();
+    /** Resolve a destination string (address or StationName:NodeName) to the destination station id for "Leaving X for Y" display. */
+    private Optional<String> resolveDestinationStationId(String cartDest) {
+        if (cartDest == null || cartDest.isEmpty()) return Optional.empty();
+        Optional<AddressHelper.ParsedDestination> parsed = AddressHelper.parseDestination(cartDest);
+        if (parsed.isPresent()) {
+            return stationRepo.findByAddress(parsed.get().stationAddress()).map(Station::getId);
         }
-
-        String defaultSubstitute = defaultBlockedSubstitute(fromStationId, fromNodeId, nextHopNodeId, cartUuid);
-        if (defaultSubstitute != null && plugin.isDebugEnabled()) {
-            plugin.getLogger().info("[Netro rule] BLOCKED hop=" + formatDestForLog(destForRules) + " (no rule) → default substitute to " + formatDestForLog(defaultSubstitute));
+        int colon = cartDest.indexOf(':');
+        if (colon > 0 && colon < cartDest.length() - 1) {
+            String stationName = cartDest.substring(0, colon).strip();
+            return stationRepo.findByNameIgnoreCase(stationName).map(Station::getId);
         }
-        return defaultSubstitute;
-    }
-
-    /** Default policy when hop is blocked and no BLOCKED rule: available terminal at current station, else at another station, else another unoccupied transfer node. */
-    private String defaultBlockedSubstitute(String currentStationId, String fromNodeId, String blockedNextHopNodeId, String cartUuid) {
-        Optional<TransferNode> termAtCurrent = nodeRepo.findAvailableTerminal(currentStationId);
-        if (termAtCurrent.isPresent()) {
-            return nodeIdToDestinationId(termAtCurrent.get().getId()).orElse(null);
-        }
-        Optional<Station> otherStation = stationRepo.findAll().stream()
-            .filter(s -> !s.getId().equals(currentStationId))
-            .filter(s -> nodeRepo.findAvailableTerminal(s.getId()).isPresent())
-            .findFirst();
-        if (otherStation.isPresent()) {
-            Optional<TransferNode> term = nodeRepo.findAvailableTerminal(otherStation.get().getId());
-            if (term.isPresent()) {
-                return nodeIdToDestinationId(term.get().getId()).orElse(null);
-            }
-        }
-        return nodeRepo.findByStation(currentStationId).stream()
-            .filter(n -> !n.getId().equals(blockedNextHopNodeId))
-            .filter(n -> routing.canDispatch(cartUuid, fromNodeId, n.getId()).canGo())
-            .findFirst()
-            .flatMap(n -> nodeIdToDestinationId(n.getId()))
-            .orElse(null);
+        return stationRepo.findByAddress(cartDest).map(Station::getId);
     }
 
     /**
      * Evaluate rule-based actions for this context: load rules for the detector's context (node),
      * match trigger (ENTERING for ENTRY, CLEARING for CLEAR) and destination condition, then apply
-     * SEND_ON/SEND_OFF to controllers or add SET_RAIL_STATE targets to deferred list (applied when cart is near each rail).
+     * SEND_ON/SEND_OFF to controllers or add SET_RAIL_STATE to deferred list only (applied in a loop
+     * every DEFERRED_RAIL_STATE_INTERVAL_TICKS when cart is within DEFERRED_RAIL_STATE_RADIUS of that rail).
      */
-    private void evaluateRuleEngine(Detector d, String role, String cartUuid, List<BulbAction> bulbActions, List<RailStateAction> railStateActions, List<RailStateAction> deferredRailStateActions, List<CruiseSpeedAction> cruiseSpeedActions, String railWorldName, String cartDir, String substitutedDestForRules) {
+    private void evaluateRuleEngine(Detector d, String role, String cartUuid, Optional<Map<String, Object>> cartDataOpt, List<BulbAction> bulbActions, List<RailStateAction> railStateActions, List<RailStateAction> deferredRailStateActions, List<CruiseSpeedAction> cruiseSpeedActions, String railWorldName, String cartDir, String substitutedDestForRules,
+            Map<String, TransferNode> nodeCache, Map<String, Station> stationCache, Map<String, String> destDisplayCache, boolean debug) {
         String nodeId = d.getNodeId();
         if (nodeId == null) return;
-        Optional<TransferNode> nodeOpt = nodeRepo.findById(nodeId);
-        String contextType = nodeOpt.map(TransferNode::isTerminal).orElse(false) ? Rule.CONTEXT_TERMINAL : Rule.CONTEXT_TRANSFER;
+        TransferNode node = nodeCache.computeIfAbsent(nodeId, id -> nodeRepo.findById(id).orElse(null));
+        String contextType = node != null && node.isTerminal() ? Rule.CONTEXT_TERMINAL : Rule.CONTEXT_TRANSFER;
         String contextId = nodeId;
         String contextSide = null;
-        String fromStationId = nodeOpt.map(TransferNode::getStationId).orElse(null);
+        String fromStationId = node != null ? node.getStationId() : null;
         String roleTriggerType = "CLEAR".equals(role) ? Rule.TRIGGER_CLEARING : Rule.TRIGGER_ENTERING;
+        String cartDest = cartDataOpt.flatMap(m -> Optional.ofNullable((String) m.get("destination_address"))).orElse(null);
         String destForRules;
         if (substitutedDestForRules != null && !substitutedDestForRules.isEmpty()) {
             destForRules = substitutedDestForRules;
         } else {
-            String cartDest = cartRepo.find(cartUuid)
-                .map(c -> (String) c.get("destination_address"))
-                .orElse(null);
             destForRules = cartDest;
             if (cartDest != null && !cartDest.isEmpty() && fromStationId != null) {
                 Optional<String> nextHopNodeId = routing.resolveNextHopNode(fromStationId, cartDest);
                 destForRules = nextHopNodeId.flatMap(this::nodeIdToDestinationId).orElse(cartDest);
             }
         }
-        String cartDestForLog = cartRepo.find(cartUuid).map(c -> (String) c.get("destination_address")).orElse(null);
-        List<Rule> rules = ruleRepo.findByContext(contextType, contextId, contextSide);
-        if (plugin.isDebugEnabled()) {
+        String cartDestForLog = cartDest;
+        List<Rule> rules = getRulesCached(contextType, contextId, contextSide);
+        if (debug) {
             plugin.getLogger().info("[Netro rule] context=" + contextType + ":" + contextId + " trigger=" + roleTriggerType
-                + " cartDest=" + formatDestForLog(cartDestForLog) + " localDest=" + formatDestForLog(destForRules)
+                + " cartDest=" + formatDestForLog(cartDestForLog, destDisplayCache) + " localDest=" + formatDestForLog(destForRules, destDisplayCache)
                 + " rules=" + rules.size());
         }
         for (Rule rule : rules) {
@@ -587,8 +739,8 @@ public class DetectorRailHandler {
             if (!forRole && !forDetected) continue;
             boolean cartMatchesDest = destinationMatchesForRule(destForRules, rule.getDestinationId());
             boolean fires = rule.isDestinationPositive() ? cartMatchesDest : !cartMatchesDest;
-            if (plugin.isDebugEnabled()) {
-                plugin.getLogger().info("[Netro rule] rule#" + rule.getRuleIndex() + " destId=" + formatDestForLog(rule.getDestinationId() != null ? rule.getDestinationId() : "any")
+            if (debug) {
+                plugin.getLogger().info("[Netro rule] rule#" + rule.getRuleIndex() + " destId=" + formatDestForLog(rule.getDestinationId() != null ? rule.getDestinationId() : "any", destDisplayCache)
                     + " positive=" + rule.isDestinationPositive() + " match=" + cartMatchesDest + " fires=" + fires + " action=" + rule.getActionType());
             }
             if (!fires) continue;
@@ -683,11 +835,12 @@ public class DetectorRailHandler {
         return Optional.empty();
     }
 
-    /** Format destination for logs/GUI: show resolved name (e.g. Snowy1:Main) instead of raw address. Handles null, empty, and "any". */
-    private String formatDestForLog(String dest) {
+    /** Format destination for logs/GUI: show resolved name (e.g. Snowy1:Main) instead of raw address. Handles null, empty, and "any". Uses cache when provided. */
+    private String formatDestForLog(String dest, Map<String, String> destDisplayCache) {
         if (dest == null || dest.isEmpty()) return "null";
         if ("any".equals(dest)) return "any";
-        return RulesMainHolder.formatDestinationId(dest, stationRepo, nodeRepo);
+        String key = dest;
+        return destDisplayCache.computeIfAbsent(key, k -> RulesMainHolder.formatDestinationId(k, stationRepo, nodeRepo));
     }
 
     /** True if cart destination matches the rule's destination_id. Uses node ID when both refer to specific nodes so different nodes at the same station do not match. */
@@ -709,6 +862,12 @@ public class DetectorRailHandler {
         setNodeControllers(out, nodeId, "RELEASE", null, false);
         setNodeControllers(out, nodeId, "RELEASE", "LEFT", false);
         setNodeControllers(out, nodeId, "RELEASE", "RIGHT", false);
+    }
+
+    private void turnOffAllReleaseNode(java.sql.Connection conn, List<BulbAction> out, String nodeId) throws java.sql.SQLException {
+        setNodeControllers(conn, out, nodeId, "RELEASE", null, false);
+        setNodeControllers(conn, out, nodeId, "RELEASE", "LEFT", false);
+        setNodeControllers(conn, out, nodeId, "RELEASE", "RIGHT", false);
     }
 
     /** Cancel the 5s held timeout for this terminal node (e.g. on CLEAR or when cart is removed). */
@@ -744,6 +903,38 @@ public class DetectorRailHandler {
         return detectorRepo.findByNodeId(nodeId).stream().filter(d -> d.hasRole("READY")).findFirst();
     }
 
+    /**
+     * Syncs physical cart presence on READY rails to held state so routing sees terminals as occupied.
+     * Call on main thread. Registers any cart sitting on a READY rail (e.g. placed there or there on chunk load)
+     * so that terminal shows as full and other carts are redirected instead of routing into it.
+     */
+    public void syncCartsOnReadyRailsToHeld() {
+        List<Detector> readyDetectors = detectorRepo.findWithRole("READY");
+        for (Detector d : readyDetectors) {
+            String nodeId = d.getNodeId();
+            if (nodeId == null) continue;
+            if (!nodeRepo.findById(nodeId).map(TransferNode::isTerminal).orElse(false)) continue;
+            World world = plugin.getServer().getWorld(d.getWorld());
+            if (world == null) continue;
+            int railX = d.getRailX(), railY = d.getRailY(), railZ = d.getRailZ();
+            Location center = new Location(world, railX + 0.5, railY + 0.5, railZ + 0.5);
+            for (Entity entity : world.getNearbyEntities(center, 0.6, 0.6, 0.6)) {
+                if (!(entity instanceof Minecart cart) || !cart.isValid()) continue;
+                if (!isCartOnDetectorBlock(cart, d.getWorld(), railX, railY, railZ)) continue;
+                String cartUuid = cart.getUniqueId().toString();
+                if (cartRepo.find(cartUuid).isEmpty()) {
+                    cartRepo.setDestination(cartUuid, null, null);
+                }
+                for (String uuid : cartRepo.findHeldCartsAtNode(nodeId, "")) {
+                    if (!uuid.equals(cartUuid)) cartRepo.clearHeld(uuid);
+                }
+                heldCountRepo.setHeldCount(nodeId, 1);
+                cartRepo.setHeld(cartUuid, "node:" + nodeId, 0);
+                break;
+            }
+        }
+    }
+
     private static boolean isCartOnDetectorBlock(Minecart cart, String worldName, int railX, int railY, int railZ) {
         if (cart == null || !cart.isValid() || !cart.getWorld().getName().equals(worldName)) return false;
         org.bukkit.block.Block at = cart.getLocation().getBlock();
@@ -751,11 +942,17 @@ public class DetectorRailHandler {
         return (bx == railX && (by == railY || by == railY + 1) && bz == railZ);
     }
 
-    private static final long TERMINAL_POLL_INTERVAL_TICKS = 20; // 1 second
+    private static final long TERMINAL_POLL_INTERVAL_TICKS = 40; // 2 seconds; reduces main-thread and DB work per READY terminal
+
+    /** Result of async terminal poll: either no release needed, or list of bulb actions to apply on main. */
+    private record TerminalPollResult(boolean shouldRelease, List<BulbAction> bulbActions) {
+        static TerminalPollResult noRelease() { return new TerminalPollResult(false, List.of()); }
+        static TerminalPollResult release(List<BulbAction> actions) { return new TerminalPollResult(true, actions); }
+    }
 
     /**
-     * Start polling every 1s: is cart still on READY rail? dest set? → RELEASE on, stop polling, start 5s post-RELEASE timeout.
-     * Call on main thread after the 1s velocity correction ends. If initialCart is non-null it is reused to avoid entity search each tick.
+     * Start polling: is cart still on READY rail? dest set? → RELEASE on, stop polling.
+     * Main thread only does cart/block check each tick; DB and bulb list building run async.
      */
     private void startTerminalPolling(String nodeId, String cartUuid, String railWorldName, int railX, int railY, int railZ, Minecart initialCart) {
         cancelTerminalPolling(nodeId);
@@ -779,26 +976,41 @@ public class DetectorRailHandler {
                 cart = findMinecartByUuid(w, uuid);
                 if (cart != null) terminalPollingCartRef.put(nodeId, cart);
             }
-            if (!isCartOnDetectorBlock(cart, wName, rx, ry, rz)) return; // cart left or not on rail; 5s timeout or CLEAR will double-check
-            Optional<TransferNode> nodeOpt = nodeRepo.findById(nodeId);
-            if (nodeOpt.isEmpty() || !nodeOpt.get().isTerminal()) return;
-            TransferNode node = nodeOpt.get();
-            String terminalAddr = node.terminalAddress(stationRepo.findById(node.getStationId()).map(Station::getAddress).orElse(null));
-            String cartDest = cartRepo.find(cartUuid).map(c -> (String) c.get("destination_address")).orElse(null);
-            if (cartDest == null || cartDest.isEmpty() || destIsForThisTerminal(cartDest, terminalAddr)) return;
-            String pairedId = node.getPairedNodeId();
-            if (pairedId != null && !routing.canDispatch(cartUuid, nodeId, pairedId).canGo()) return;
-            // Dest set and outbound → RELEASE on, stop polling, start 5s post-RELEASE
-            cancelTerminalPolling(nodeId);
-            cancelTerminalTimeout(nodeId);
-            List<BulbAction> bulbActions = new ArrayList<>();
-            turnOffAllReleaseNode(bulbActions, nodeId);
-            setNodeControllers(bulbActions, nodeId, "RELEASE", null, true);
-            for (BulbAction a : bulbActions) {
-                World ww = plugin.getServer().getWorld(a.world);
-                if (ww != null) CopperBulbHelper.setPowered(ww, a.x, a.y, a.z, a.on);
-            }
-            schedulePostReleaseTimeout(nodeId);
+            if (!isCartOnDetectorBlock(cart, wName, rx, ry, rz)) return;
+
+            plugin.getDatabase().runAsyncRead(conn -> {
+                try {
+                    Optional<TransferNode> nodeOpt = nodeRepo.findById(conn, nodeId);
+                    if (nodeOpt.isEmpty() || !nodeOpt.get().isTerminal()) return TerminalPollResult.noRelease();
+                    TransferNode node = nodeOpt.get();
+                    String terminalAddr = node.terminalAddress(stationRepo.findById(conn, node.getStationId()).map(Station::getAddress).orElse(null));
+                    String cartDest = cartRepo.find(conn, cartUuid).map(c -> (String) c.get("destination_address")).orElse(null);
+                    if (cartDest == null || cartDest.isEmpty() || destIsForThisTerminal(cartDest, terminalAddr)) return TerminalPollResult.noRelease();
+                    String pairedId = node.getPairedNodeId();
+                    if (pairedId != null) {
+                        TransferNode fromNode = nodeRepo.findById(conn, nodeId).orElse(null);
+                        TransferNode toNode = nodeRepo.findById(conn, pairedId).orElse(null);
+                        if (fromNode == null || toNode == null) return TerminalPollResult.noRelease();
+                        if (nodeRepo.countFreeSlots(conn, pairedId) == 0) return TerminalPollResult.noRelease();
+                    }
+                    List<BulbAction> bulbActions = new ArrayList<>();
+                    turnOffAllReleaseNode(conn, bulbActions, nodeId);
+                    setNodeControllers(conn, bulbActions, nodeId, "RELEASE", null, true);
+                    return TerminalPollResult.release(bulbActions);
+                } catch (java.sql.SQLException e) {
+                    throw new RuntimeException(e);
+                }
+            }, result -> {
+                if (result == null || !result.shouldRelease()) return;
+                plugin.removeReadyHold(cartUuid);
+                cancelTerminalPolling(nodeId);
+                cancelTerminalTimeout(nodeId);
+                for (BulbAction a : result.bulbActions()) {
+                    World ww = plugin.getServer().getWorld(a.world);
+                    if (ww != null) CopperBulbHelper.setPowered(ww, a.x, a.y, a.z, a.on);
+                }
+                schedulePostReleaseTimeout(nodeId);
+            });
         }, TERMINAL_POLL_INTERVAL_TICKS, TERMINAL_POLL_INTERVAL_TICKS);
         terminalPollingTasks.put(nodeId, poll);
     }
@@ -900,6 +1112,12 @@ public class DetectorRailHandler {
         }
     }
 
+    private void setNodeControllers(java.sql.Connection conn, List<BulbAction> out, String nodeId, String role, String direction, boolean on) throws java.sql.SQLException {
+        for (Controller c : controllerRepo.findByNodeAndRule(conn, nodeId, role, direction)) {
+            out.add(new BulbAction(c.getWorld(), c.getX(), c.getY(), c.getZ(), on, 0));
+        }
+    }
+
     /** Treat L/LEFT and R/RIGHT as the same so NOT_TRA:L matches cart dir LEFT. */
     private static boolean directionLabelsMatch(String ruleDir, String cartDir) {
         if (ruleDir.equals(cartDir)) return true;
@@ -966,8 +1184,15 @@ public class DetectorRailHandler {
         }
         Minecart cart = info.cartRef;
         if (cart == null || !cart.isValid()) {
-            cart = findMinecartByUuid(plugin.getServer(), uuid);
-            if (cart != null) info.cartRef = cart;
+            if (info.worldName != null) {
+                World w = plugin.getServer().getWorld(info.worldName);
+                if (w != null) cart = findMinecartByUuid(w, uuid);
+            }
+            if (cart == null) cart = findMinecartByUuid(plugin.getServer(), uuid);
+            if (cart != null) {
+                info.cartRef = cart;
+                if (cart.getWorld() != null) info.worldName = cart.getWorld().getName();
+            }
         }
         if (cart == null || !cart.isValid()) {
             info.task.cancel();
@@ -1035,6 +1260,7 @@ public class DetectorRailHandler {
                 String nextDest = cartRepo.find(nextToRelease).map(data -> (String) data.get("destination_address")).orElse(null);
                 if (nextDest != null && !nextDest.isEmpty() && !destIsForThisTerminal(nextDest, terminalAddr)
                     && (pairedId == null || routing.canDispatch(nextToRelease, nodeId, pairedId).canGo())) {
+                    plugin.removeReadyHold(nextToRelease);
                     setNodeControllers(bulbActions, nodeId, "RELEASE", null, true);
                 }
             }
@@ -1085,12 +1311,15 @@ public class DetectorRailHandler {
         final BukkitTask task;
         /** Reused each tick to avoid entity search; set when found if initially null. */
         Minecart cartRef;
+        /** World name when task was created (or when cart was last found) so we try that world first when re-finding. */
+        String worldName;
 
         DeferredRailStateTask(long startTime, List<RailStateAction> pending, BukkitTask task, Minecart cartRef) {
             this.startTime = startTime;
             this.pending = pending;
             this.task = task;
             this.cartRef = cartRef;
+            this.worldName = (cartRef != null && cartRef.isValid() && cartRef.getWorld() != null) ? cartRef.getWorld().getName() : null;
         }
     }
 

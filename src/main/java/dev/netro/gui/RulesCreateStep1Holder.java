@@ -12,14 +12,12 @@ import org.bukkit.inventory.meta.ItemMeta;
 
 import java.util.List;
 
-/** Step 1 of create rule: choose trigger (ENTERING, CLEARING, DETECTED, or BLOCKED). When editing, Save and Next are shown. */
+/** Step 1 of create rule: choose trigger (ENTERING, CLEARING, or DETECTED). When editing, Save and Next are shown. */
 public class RulesCreateStep1Holder implements InventoryHolder {
 
     public static final int SIZE = 27;
     public static final int SLOT_ENTERING = 10;
     public static final int SLOT_CLEARING = 12;
-    /** When the chosen terminal is blocked (full); one rule per terminal. */
-    public static final int SLOT_BLOCKED = 14;
     /** Whenever a cart is detected (any pass by the detector). */
     public static final int SLOT_DETECTED = 16;
     public static final int SLOT_BACK = 22;
@@ -59,15 +57,12 @@ public class RulesCreateStep1Holder implements InventoryHolder {
         this.inventory = Bukkit.createInventory(this, SIZE, title);
         ItemStack entering = newItem(Material.OAK_DOOR, "When cart enters", List.of("Fires at ENTRY. (READY does not apply rules.)"));
         ItemStack clearing = newItem(Material.REPEATER, "When cart clears", List.of("Fires at CLEAR."));
-        ItemStack blocked = newItem(Material.REDSTONE_TORCH, "When terminal blocked", List.of("Slot full; pick terminal, set redirect."));
         ItemStack detected = newItem(Material.DETECTOR_RAIL, "When cart detected", List.of("Fires when cart passes detector (ENTRY or CLEAR)."));
         if (Rule.TRIGGER_ENTERING.equals(this.selectedTrigger)) enchant(entering);
         if (Rule.TRIGGER_CLEARING.equals(this.selectedTrigger)) enchant(clearing);
-        if (Rule.TRIGGER_BLOCKED.equals(this.selectedTrigger)) enchant(blocked);
         if (Rule.TRIGGER_DETECTED.equals(this.selectedTrigger)) enchant(detected);
         inventory.setItem(SLOT_ENTERING, entering);
         inventory.setItem(SLOT_CLEARING, clearing);
-        inventory.setItem(SLOT_BLOCKED, blocked);
         inventory.setItem(SLOT_DETECTED, detected);
         inventory.setItem(SLOT_BACK, newItem(Material.ARROW, "Back", List.of("Back to rules.")));
         if (editRule != null) {

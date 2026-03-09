@@ -16,7 +16,7 @@ import java.util.List;
 public class NetroCommand implements CommandExecutor, TabCompleter {
 
     private static final List<String> SUBCOMMANDS = Arrays.asList(
-        "cancel", "clearcache", "debug", "guide", "whereami",
+        "cancel", "clearcache", "debug", "guide", "titles", "whereami",
         "station", "setdestination", "dns", "cartcontroller", "railroadcontroller"
     );
 
@@ -45,7 +45,7 @@ public class NetroCommand implements CommandExecutor, TabCompleter {
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (args.length == 0) {
-            sender.sendMessage("Usage: /netro <subcommand> [args]. Subcommands: cancel, clearcache, debug, guide, whereami, station, setdestination, dns, cartcontroller, railroadcontroller");
+            sender.sendMessage("Usage: /netro <subcommand> [args]. Subcommands: cancel, clearcache, debug, guide, titles, whereami, station, setdestination, dns, cartcontroller, railroadcontroller");
             return true;
         }
         String sub = args[0].toLowerCase();
@@ -93,6 +93,15 @@ public class NetroCommand implements CommandExecutor, TabCompleter {
             sender.sendMessage("You received the Netro Guide. Use the table of contents to jump to sections.");
             return true;
         }
+        if ("titles".equals(sub)) {
+            if (!(sender instanceof org.bukkit.entity.Player player)) {
+                sender.sendMessage("Only players can toggle title messages.");
+                return true;
+            }
+            boolean nowEnabled = plugin.toggleTitleMessages(player);
+            sender.sendMessage("Rail title messages (arriving, departing, etc.) are now " + (nowEnabled ? "on" : "off") + ".");
+            return true;
+        }
         String subLabel = "netro " + sub;
         if ("station".equals(sub)) return stationCommand.onCommand(sender, command, subLabel, subArgs);
         if ("setdestination".equals(sub)) return setDestinationCommand.onCommand(sender, command, subLabel, subArgs);
@@ -101,7 +110,7 @@ public class NetroCommand implements CommandExecutor, TabCompleter {
         if ("cartcontroller".equals(sub)) return cartControllerCommand.onCommand(sender, command, subLabel, subArgs);
         if ("railroadcontroller".equals(sub)) return railroadControllerCommand.onCommand(sender, command, subLabel, subArgs);
 
-        sender.sendMessage("Unknown subcommand. Use: /netro cancel | clearcache | debug | guide | whereami | station | setdestination | dns | cartcontroller | railroadcontroller");
+        sender.sendMessage("Unknown subcommand. Use: /netro cancel | clearcache | debug | guide | titles | whereami | station | setdestination | dns | cartcontroller | railroadcontroller");
         return true;
     }
 

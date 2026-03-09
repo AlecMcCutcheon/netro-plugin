@@ -7,6 +7,7 @@ import dev.netro.database.RouteCacheRepository;
 import dev.netro.database.StationRepository;
 import dev.netro.database.TransferNodePortalRepository;
 import dev.netro.database.TransferNodeRepository;
+import dev.netro.gui.RulesMainHolder;
 import dev.netro.model.Station;
 import dev.netro.model.TransferNode;
 import dev.netro.util.AddressHelper;
@@ -44,6 +45,60 @@ public class RoutingEngine {
     private final Set<RouteRefreshKey> pendingRefreshKeys = ConcurrentHashMap.newKeySet();
 
     private record RouteRefreshKey(String fromStationId, String destStationId) {}
+
+    /** Result when the requested terminal is occupied: display text for the recommended alternative (or "No alternative terminal available."). */
+    public static record TerminalOccupiedResult(String alternativeDisplay) {}
+
+    /**
+     * If the destination is a terminal and it is occupied, returns a result with the recommended closest alternative
+     * (same-station free terminal first, then nearest other station with a free terminal). Otherwise returns empty.
+     */
+    public Optional<TerminalOccupiedResult> checkTerminalOccupiedAndGetAlternative(String destinationAddress) {
+        if (destinationAddress == null || destinationAddress.isBlank()) return Optional.empty();
+        Optional<AddressHelper.ParsedDestination> parsed = AddressHelper.parseDestination(destinationAddress);
+        if (parsed.isEmpty() || parsed.get().terminalIndex() == null) return Optional.empty();
+        String stationAddress = parsed.get().stationAddress();
+        int terminalIndex = parsed.get().terminalIndex();
+        Optional<Station> destStationOpt = stationRepo.findByAddress(stationAddress);
+        if (destStationOpt.isEmpty()) return Optional.empty();
+        String destStationId = destStationOpt.get().getId();
+        Optional<TransferNode> nodeOpt = nodeRepo.findTerminalByIndex(destStationId, terminalIndex);
+        if (nodeOpt.isEmpty()) return Optional.empty();
+        String nodeId = nodeOpt.get().getId();
+        if (heldCountRepo.getHeldCount(nodeId) == 0) return Optional.empty();
+
+        String alternativeDisplay = findClosestAlternativeTerminalDisplay(destStationId, nodeId, destStationOpt.get());
+        return Optional.of(new TerminalOccupiedResult(alternativeDisplay));
+    }
+
+    private String findClosestAlternativeTerminalDisplay(String destStationId, String occupiedNodeId, Station destStation) {
+        List<String> freeAtSame = nodeRepo.findTerminalNodeIdsWithFreeSlot(destStationId, occupiedNodeId);
+        if (!freeAtSame.isEmpty()) {
+            Optional<TransferNode> altNode = nodeRepo.findById(freeAtSame.get(0));
+            String altAddr = altNode.flatMap(n -> Optional.ofNullable(n.terminalAddress(destStation.getAddress()))).orElse(null);
+            if (altAddr != null) return RulesMainHolder.formatDestinationId(altAddr, stationRepo, nodeRepo);
+        }
+        List<String> otherStationIds = new ArrayList<>(nodeRepo.findStationIdsWithAvailableTerminal());
+        otherStationIds.remove(destStationId);
+        if (otherStationIds.isEmpty()) return "No alternative terminal available.";
+        List<Station> others = stationRepo.findByIds(otherStationIds);
+        String destWorld = destStation.getWorld();
+        int dx = destStation.getSignX(), dy = destStation.getSignY(), dz = destStation.getSignZ();
+        Optional<Station> nearest = others.stream()
+            .filter(s -> destWorld.equals(s.getWorld()))
+            .min(Comparator.comparingLong(s -> sq(s.getSignX() - dx) + sq(s.getSignY() - dy) + sq(s.getSignZ() - dz)));
+        if (nearest.isEmpty()) nearest = others.stream().min(Comparator.comparingLong(s -> sq(s.getSignX() - dx) + sq(s.getSignY() - dy) + sq(s.getSignZ() - dz)));
+        if (nearest.isEmpty()) return "No alternative terminal available.";
+        Station altStation = nearest.get();
+        List<String> free = nodeRepo.findTerminalNodeIdsWithFreeSlot(altStation.getId(), null);
+        if (free.isEmpty()) return "No alternative terminal available.";
+        Optional<TransferNode> altNode = nodeRepo.findById(free.get(0));
+        String altAddr = altNode.flatMap(n -> Optional.ofNullable(n.terminalAddress(altStation.getAddress()))).orElse(null);
+        if (altAddr == null) return "No alternative terminal available.";
+        return RulesMainHolder.formatDestinationId(altAddr, stationRepo, nodeRepo);
+    }
+
+    private static long sq(int n) { return (long) n * n; }
 
     public RoutingEngine(NetroPlugin plugin) {
         this.plugin = plugin;
@@ -447,25 +502,10 @@ public class RoutingEngine {
             }
             return Optional.empty();
         }
-        String nextHopId = nextHop.get();
-        Optional<TransferNode> nodeOpt = nodeRepo.findById(nextHopId);
-        if (nodeOpt.isEmpty()) return Optional.of(nextHopId);
-        String pairedId = nodeOpt.get().getPairedNodeId();
-        DispatchResult dispatchResult = pairedId != null ? canDispatch(cartUuid, nextHopId, pairedId) : DispatchResult.clear();
-        String chosenNodeId;
-        if (pairedId != null && !dispatchResult.canGo()) {
-            // Blocked: send cart to terminal to wait; we still return chosen so station controllers get TRA (terminal) and NOT_TRA (others).
-            chosenNodeId = nodeRepo.findAvailableTerminal(stationId).map(TransferNode::getId).orElse(nextHopId);
-        } else {
-            chosenNodeId = nextHopId;
-        }
         if (plugin.isDebugEnabled()) {
-            plugin.getLogger().info("[Netro routing] cart=" + cartUuid + " station=" + stationId
-                + " finalDest=" + dest + " localDest=" + chosenNodeId
-                + " preferred=" + nextHopId + " canDispatch=" + dispatchResult.canGo()
-                + (dispatchResult.reason() != null ? " reason=" + dispatchResult.reason() : ""));
+            plugin.getLogger().info("[Netro routing] cart=" + cartUuid + " station=" + stationId + " dest=" + dest + " nextHop=" + formatNodeIdForLog(nextHop.get()));
         }
-        return Optional.of(chosenNodeId);
+        return nextHop;
     }
 
     /**
@@ -486,37 +526,38 @@ public class RoutingEngine {
             if (dest != null && !dest.isEmpty()) return Optional.empty();
         }
 
-        Optional<TransferNode> atCurrent = nodeRepo.findAvailableTerminal(currentStationId);
-        if (atCurrent.isPresent()) {
+        java.util.List<String> freeAtCurrent = nodeRepo.findTerminalNodeIdsWithFreeSlot(currentStationId, null);
+        if (!freeAtCurrent.isEmpty()) {
+            String nodeId = freeAtCurrent.get(0);
             Optional<Station> st = stationRepo.findById(currentStationId);
-            String termAddr = st.flatMap(s -> Optional.ofNullable(atCurrent.get().terminalAddress(s.getAddress()))).orElse(null);
+            Optional<TransferNode> node = nodeRepo.findById(nodeId);
+            String termAddr = node.flatMap(n -> st.map(s -> n.terminalAddress(s.getAddress()))).orElse(null);
             if (termAddr != null) {
                 cartRepo.setDestination(cartUuid, termAddr, currentStationId);
                 plugin.getDetectorRailHandler().recheckTerminalReleaseForCart(cartUuid);
                 if (plugin.isDebugEnabled()) {
                     plugin.getLogger().info("[Netro routing] no-destination rule: cart=" + cartUuid + " → set dest to terminal at current station " + termAddr);
                 }
-                return Optional.of(atCurrent.get().getId());
+                return Optional.of(nodeId);
             }
         }
 
-        Optional<Station> otherWithTerminal = stationRepo.findAll().stream()
-            .filter(s -> !s.getId().equals(currentStationId))
-            .filter(s -> nodeRepo.findAvailableTerminal(s.getId()).isPresent())
-            .findFirst();
-        if (otherWithTerminal.isPresent()) {
-            Optional<TransferNode> term = nodeRepo.findAvailableTerminal(otherWithTerminal.get().getId());
-            if (term.isPresent()) {
-                String termAddr = term.get().terminalAddress(otherWithTerminal.get().getAddress());
-                if (termAddr != null) {
-                    cartRepo.setDestination(cartUuid, termAddr, currentStationId);
-                    plugin.getDetectorRailHandler().recheckTerminalReleaseForCart(cartUuid);
-                    Optional<String> firstHop = resolveNextHopNode(currentStationId, termAddr);
-                    if (plugin.isDebugEnabled()) {
-                        plugin.getLogger().info("[Netro routing] no-destination rule: cart=" + cartUuid + " → set dest to terminal at " + otherWithTerminal.get().getName() + " " + termAddr);
-                    }
-                    return firstHop;
+        java.util.List<String> otherStationIds = new java.util.ArrayList<>(nodeRepo.findStationIdsWithAvailableTerminal());
+        otherStationIds.remove(currentStationId);
+        for (String sid : otherStationIds) {
+            java.util.List<String> free = nodeRepo.findTerminalNodeIdsWithFreeSlot(sid, null);
+            if (free.isEmpty()) continue;
+            Optional<TransferNode> term = nodeRepo.findById(free.get(0));
+            Optional<Station> station = stationRepo.findById(sid);
+            String termAddr = term.flatMap(t -> station.map(s -> t.terminalAddress(s.getAddress()))).orElse(null);
+            if (termAddr != null) {
+                cartRepo.setDestination(cartUuid, termAddr, currentStationId);
+                plugin.getDetectorRailHandler().recheckTerminalReleaseForCart(cartUuid);
+                Optional<String> firstHop = resolveNextHopNode(currentStationId, termAddr);
+                if (plugin.isDebugEnabled()) {
+                    plugin.getLogger().info("[Netro routing] no-destination rule: cart=" + cartUuid + " → set dest to terminal at " + station.get().getName() + " " + termAddr);
                 }
+                return firstHop;
             }
         }
 
@@ -541,11 +582,18 @@ public class RoutingEngine {
      * destination to the nearest available terminal (current station first, then any other) and returns the
      * old destination address so the caller can notify the player. Returns empty if the cart has no destination,
      * the destination is invalid, the cart is already at the destination station, or a route exists.
+     * Uses route cache when possible to avoid Dijkstra on every detector pass.
      */
     public Optional<String> handleUnreachableAndRedirectToNearestTerminal(String cartUuid, String currentStationId) {
-        Optional<Map<String, Object>> cartData = cartRepo.find(cartUuid);
-        if (cartData.isEmpty()) return Optional.empty();
-        String dest = (String) cartData.get().get("destination_address");
+        return handleUnreachableAndRedirectToNearestTerminal(cartUuid, currentStationId, cartRepo.find(cartUuid));
+    }
+
+    /**
+     * Overload that accepts pre-fetched cart data to avoid redundant find when caller already has it.
+     */
+    public Optional<String> handleUnreachableAndRedirectToNearestTerminal(String cartUuid, String currentStationId, Optional<Map<String, Object>> cartDataOpt) {
+        if (cartDataOpt.isEmpty()) return Optional.empty();
+        String dest = (String) cartDataOpt.get().get("destination_address");
         if (dest == null || dest.isEmpty()) return Optional.empty();
 
         Optional<AddressHelper.ParsedDestination> parsed = AddressHelper.parseDestination(dest);
@@ -556,14 +604,18 @@ public class RoutingEngine {
 
         if (currentStationId.equals(destStationId)) return Optional.empty();
 
+        // Use route cache first: if we have a cached route, destination is reachable → no redirect.
+        if (routeCacheRepo.get(currentStationId, destStationId).isPresent()) return Optional.empty();
+
         DijkstraResult dr = dijkstra(currentStationId, destStationId);
         if (dr.paths().containsKey(destStationId)) return Optional.empty();
 
         String oldDest = dest;
-        Optional<TransferNode> atCurrent = nodeRepo.findAvailableTerminal(currentStationId);
-        if (atCurrent.isPresent()) {
+        java.util.List<String> freeAtCurrent = nodeRepo.findTerminalNodeIdsWithFreeSlot(currentStationId, null);
+        if (!freeAtCurrent.isEmpty()) {
+            Optional<TransferNode> node = nodeRepo.findById(freeAtCurrent.get(0));
             Optional<Station> st = stationRepo.findById(currentStationId);
-            String termAddr = st.flatMap(s -> Optional.ofNullable(atCurrent.get().terminalAddress(s.getAddress()))).orElse(null);
+            String termAddr = node.flatMap(n -> st.map(s -> n.terminalAddress(s.getAddress()))).orElse(null);
             if (termAddr != null) {
                 cartRepo.setDestination(cartUuid, termAddr, currentStationId);
                 plugin.getDetectorRailHandler().recheckTerminalReleaseForCart(cartUuid);
@@ -572,21 +624,20 @@ public class RoutingEngine {
                 return Optional.of(oldDest);
             }
         }
-        Optional<Station> otherWithTerminal = stationRepo.findAll().stream()
-            .filter(s -> !s.getId().equals(currentStationId))
-            .filter(s -> nodeRepo.findAvailableTerminal(s.getId()).isPresent())
-            .findFirst();
-        if (otherWithTerminal.isPresent()) {
-            Optional<TransferNode> term = nodeRepo.findAvailableTerminal(otherWithTerminal.get().getId());
-            if (term.isPresent()) {
-                String termAddr = term.get().terminalAddress(otherWithTerminal.get().getAddress());
-                if (termAddr != null) {
-                    cartRepo.setDestination(cartUuid, termAddr, currentStationId);
-                    plugin.getDetectorRailHandler().recheckTerminalReleaseForCart(cartUuid);
-                    if (plugin.isDebugEnabled())
-                        plugin.getLogger().info("[Netro routing] unreachable dest " + oldDest + " → redirected cart " + cartUuid + " to " + otherWithTerminal.get().getName() + " " + termAddr);
-                    return Optional.of(oldDest);
-                }
+        java.util.List<String> otherStationIds = new java.util.ArrayList<>(nodeRepo.findStationIdsWithAvailableTerminal());
+        otherStationIds.remove(currentStationId);
+        for (String sid : otherStationIds) {
+            java.util.List<String> free = nodeRepo.findTerminalNodeIdsWithFreeSlot(sid, null);
+            if (free.isEmpty()) continue;
+            Optional<TransferNode> term = nodeRepo.findById(free.get(0));
+            Optional<Station> station = stationRepo.findById(sid);
+            String termAddr = term.flatMap(t -> station.map(s -> t.terminalAddress(s.getAddress()))).orElse(null);
+            if (termAddr != null) {
+                cartRepo.setDestination(cartUuid, termAddr, currentStationId);
+                plugin.getDetectorRailHandler().recheckTerminalReleaseForCart(cartUuid);
+                if (plugin.isDebugEnabled())
+                    plugin.getLogger().info("[Netro routing] unreachable dest " + oldDest + " → redirected cart " + cartUuid + " to " + station.get().getName() + " " + termAddr);
+                return Optional.of(oldDest);
             }
         }
         return Optional.empty();

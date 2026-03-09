@@ -39,7 +39,7 @@ import java.util.concurrent.ConcurrentHashMap;
 /** Handles clicks in cart controller GUIs and runs the 20-tick lore refresh for open main menus. */
 public class CartControllerGuiListener implements Listener {
 
-    private static final long REFRESH_TICKS = 20L;
+    private static final long REFRESH_TICKS = 40L;
 
     private final NetroPlugin plugin;
     private final CartRepository cartRepo;
@@ -48,6 +48,8 @@ public class CartControllerGuiListener implements Listener {
     private final Map<String, CartControllerState> stateByCart = new ConcurrentHashMap<>();
     /** Reused in runCruiseReapply to avoid entity search each run. Cleared when invalid. */
     private final Map<String, Minecart> cruiseCartRefs = new ConcurrentHashMap<>();
+    /** World name per cart UUID so findMinecartByUuid can try that world first. */
+    private final Map<String, String> cartUuidToWorldName = new ConcurrentHashMap<>();
     private BukkitTask refreshTask;
     private BukkitTask cruiseTask;
 
@@ -89,13 +91,20 @@ public class CartControllerGuiListener implements Listener {
     }
 
     private void refreshOpenMenus() {
-        Map<String, Minecart> uuidToCart = collectAllMinecartsByUuid();
+        java.util.Set<String> needed = new java.util.HashSet<>();
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            if (p.getOpenInventory().getTopInventory().getHolder() instanceof CartMenuHolder holder)
+                needed.add(holder.getCartUuid());
+        }
+        if (needed.isEmpty()) return;
+        Map<String, Minecart> uuidToCart = collectMinecartsByUuid(needed);
         for (Player p : Bukkit.getOnlinePlayers()) {
             Inventory top = p.getOpenInventory().getTopInventory();
             if (top.getHolder() instanceof CartMenuHolder holder) {
                 Minecart cart = uuidToCart.get(holder.getCartUuid());
                 if (cart != null && cart.isValid()) {
                     cruiseCartRefs.put(holder.getCartUuid(), cart);
+                    updateCartUuidWorldCache(holder.getCartUuid(), cart.getWorld());
                     String currentDest = cartRepo.getDestinationAddress(holder.getCartUuid()).orElse(null);
                     String destDisplay = (currentDest != null && !currentDest.isEmpty())
                         ? RulesMainHolder.formatDestinationId(currentDest, stationRepo, nodeRepo)
@@ -106,11 +115,18 @@ public class CartControllerGuiListener implements Listener {
         }
     }
 
-    private static Map<String, Minecart> collectAllMinecartsByUuid() {
+    /** Collect only minecarts whose UUID is in needed; stop once all found. */
+    private static Map<String, Minecart> collectMinecartsByUuid(java.util.Set<String> needed) {
         Map<String, Minecart> out = new HashMap<>();
+        java.util.Set<String> remaining = new java.util.HashSet<>(needed);
         for (org.bukkit.World w : Bukkit.getWorlds()) {
+            if (remaining.isEmpty()) break;
             for (Minecart cart : w.getEntitiesByClass(Minecart.class)) {
-                out.put(cart.getUniqueId().toString(), cart);
+                String id = cart.getUniqueId().toString();
+                if (remaining.remove(id)) {
+                    out.put(id, cart);
+                    if (remaining.isEmpty()) break;
+                }
             }
         }
         return out;
@@ -190,21 +206,46 @@ public class CartControllerGuiListener implements Listener {
         Minecart cart = findMinecartByUuid(cartUuid);
         if (cart != null && cart.isValid()) {
             cruiseCartRefs.put(cartUuid, cart);
+            updateCartUuidWorldCache(cartUuid, cart.getWorld());
             applyCruiseSpeed(cart, s);
         }
     }
 
-    private static Minecart findMinecartByUuid(String uuidStr) {
+    /** Update world cache when we know which world a cart is in (e.g. from refreshOpenMenus or when we have the entity). */
+    private void updateCartUuidWorldCache(String cartUuid, org.bukkit.World world) {
+        if (cartUuid != null && world != null) cartUuidToWorldName.put(cartUuid, world.getName());
+    }
+
+    private Minecart findMinecartByUuid(String uuidStr) {
         UUID uuid;
         try {
             uuid = UUID.fromString(uuidStr);
         } catch (IllegalArgumentException e) {
             return null;
         }
-        for (org.bukkit.World w : Bukkit.getWorlds()) {
-            for (Minecart cart : w.getEntitiesByClass(Minecart.class)) {
-                if (cart.getUniqueId().equals(uuid)) return cart;
+        String cachedWorldName = cartUuidToWorldName.get(uuidStr);
+        if (cachedWorldName != null) {
+            org.bukkit.World w = Bukkit.getWorld(cachedWorldName);
+            if (w != null) {
+                Minecart cart = findMinecartInWorld(w, uuid);
+                if (cart != null) return cart;
             }
+            cartUuidToWorldName.remove(uuidStr);
+        }
+        for (org.bukkit.World w : Bukkit.getWorlds()) {
+            Minecart cart = findMinecartInWorld(w, uuid);
+            if (cart != null) {
+                cartUuidToWorldName.put(uuidStr, w.getName());
+                return cart;
+            }
+        }
+        return null;
+    }
+
+    private static Minecart findMinecartInWorld(org.bukkit.World world, UUID uuid) {
+        if (world == null || uuid == null) return null;
+        for (Minecart cart : world.getEntitiesByClass(Minecart.class)) {
+            if (cart.getUniqueId().equals(uuid)) return cart;
         }
         return null;
     }
@@ -472,16 +513,6 @@ public class CartControllerGuiListener implements Listener {
             }
             return;
         }
-        if (slot == RulesCreateStep1Holder.SLOT_BLOCKED) {
-            if (holder.isEditMode()) {
-                RulesCreateStep1Holder step1Select = new RulesCreateStep1Holder(holder.getPlugin(), holder.getContextType(), holder.getContextId(), holder.getContextSide(), holder.getRulesTitle(), holder.getEditRule(), dev.netro.model.Rule.TRIGGER_BLOCKED);
-                player.openInventory(step1Select.getInventory());
-            } else {
-                RulesDestinationPickerHolder picker = new RulesDestinationPickerHolder(holder.getPlugin(), holder.getContextType(), holder.getContextId(), holder.getContextSide(), holder.getRulesTitle(), dev.netro.model.Rule.TRIGGER_BLOCKED, true, RulesDestinationPickerHolder.PICKER_MODE_BLOCKED_HOP, null);
-                player.openInventory(picker.getInventory());
-            }
-            return;
-        }
         if (slot == RulesCreateStep1Holder.SLOT_DETECTED) {
             if (holder.isEditMode()) {
                 RulesCreateStep1Holder step1Select = new RulesCreateStep1Holder(holder.getPlugin(), holder.getContextType(), holder.getContextId(), holder.getContextSide(), holder.getRulesTitle(), holder.getEditRule(), dev.netro.model.Rule.TRIGGER_DETECTED);
@@ -515,6 +546,7 @@ public class CartControllerGuiListener implements Listener {
         );
         RuleRepository repo = new RuleRepository(plugin.getDatabase());
         repo.update(updated);
+        plugin.getDetectorRailHandler().invalidateRuleCache();
     }
 
     private void handleRulesCreateStep2Click(Player player, RulesCreateStep2Holder holder, int slot) {
@@ -567,61 +599,17 @@ public class CartControllerGuiListener implements Listener {
 
     private void handleRulesDestinationPickerClick(Player player, RulesDestinationPickerHolder picker, int slot) {
         if (picker.isBackSlot(slot)) {
-            if (RulesDestinationPickerHolder.PICKER_MODE_SET_DESTINATION.equals(picker.getPickerMode())) {
-                RulesDestinationPickerHolder backToBlocked = new RulesDestinationPickerHolder(picker.getPlugin(), picker.getContextType(), picker.getContextId(), picker.getContextSide(), picker.getRulesTitle(), dev.netro.model.Rule.TRIGGER_BLOCKED, true, RulesDestinationPickerHolder.PICKER_MODE_BLOCKED_HOP, null);
-                player.openInventory(backToBlocked.getInventory());
-            } else if (RulesDestinationPickerHolder.PICKER_MODE_BLOCKED_HOP.equals(picker.getPickerMode())) {
-                RulesCreateStep1Holder step1 = new RulesCreateStep1Holder(picker.getPlugin(), picker.getContextType(), picker.getContextId(), picker.getContextSide(), picker.getRulesTitle());
-                player.openInventory(step1.getInventory());
+            if (picker.getEditRule() != null) {
+                RulesCreateStep2Holder step2 = new RulesCreateStep2Holder(picker.getPlugin(), picker.getContextType(), picker.getContextId(), picker.getContextSide(), picker.getRulesTitle(), picker.getTriggerType(), picker.getEditRule());
+                player.openInventory(step2.getInventory());
             } else {
-                if (picker.getEditRule() != null) {
-                    RulesCreateStep2Holder step2 = new RulesCreateStep2Holder(picker.getPlugin(), picker.getContextType(), picker.getContextId(), picker.getContextSide(), picker.getRulesTitle(), picker.getTriggerType(), picker.getEditRule());
-                    player.openInventory(step2.getInventory());
-                } else {
-                    RulesCreateStep2Holder step2 = new RulesCreateStep2Holder(picker.getPlugin(), picker.getContextType(), picker.getContextId(), picker.getContextSide(), picker.getRulesTitle(), picker.getTriggerType());
-                    player.openInventory(step2.getInventory());
-                }
+                RulesCreateStep2Holder step2 = new RulesCreateStep2Holder(picker.getPlugin(), picker.getContextType(), picker.getContextId(), picker.getContextSide(), picker.getRulesTitle(), picker.getTriggerType());
+                player.openInventory(step2.getInventory());
             }
             return;
         }
         String destId = picker.getDestinationIdAtSlot(slot);
         if (destId != null) {
-            if (RulesDestinationPickerHolder.PICKER_MODE_BLOCKED_HOP.equals(picker.getPickerMode())) {
-                RuleRepository ruleRepo = new RuleRepository(plugin.getDatabase(), nodeRepo);
-                String normalizedHop = normalizeDestinationForStorage(destId);
-                if (ruleRepo.findBlockedRuleForDestination(picker.getContextType(), picker.getContextId(), picker.getContextSide(), normalizedHop != null ? normalizedHop : destId).isPresent()) {
-                    player.sendMessage("A \"when blocked\" rule already exists for this hop. Delete it first to set a different redirect.");
-                    return;
-                }
-                RulesDestinationPickerHolder setDestPicker = new RulesDestinationPickerHolder(picker.getPlugin(), picker.getContextType(), picker.getContextId(), picker.getContextSide(), picker.getRulesTitle(), dev.netro.model.Rule.TRIGGER_BLOCKED, true, RulesDestinationPickerHolder.PICKER_MODE_SET_DESTINATION, destId);
-                player.openInventory(setDestPicker.getInventory());
-                return;
-            }
-            if (RulesDestinationPickerHolder.PICKER_MODE_SET_DESTINATION.equals(picker.getPickerMode())) {
-                RuleRepository ruleRepo = new RuleRepository(plugin.getDatabase(), nodeRepo);
-                int ruleIndex = ruleRepo.nextRuleIndex(picker.getContextType(), picker.getContextId(), picker.getContextSide());
-                String storedHopId = normalizeDestinationForStorage(picker.getBlockedHopId());
-                String storedActionDest = normalizeDestinationForStorage(destId);
-                dev.netro.model.Rule rule = new dev.netro.model.Rule(
-                    UUID.randomUUID().toString(),
-                    picker.getContextType(),
-                    picker.getContextId(),
-                    picker.getContextSide(),
-                    ruleIndex,
-                    dev.netro.model.Rule.TRIGGER_BLOCKED,
-                    true,
-                    storedHopId != null ? storedHopId : picker.getBlockedHopId(),
-                    dev.netro.model.Rule.ACTION_SET_DESTINATION,
-                    storedActionDest != null ? storedActionDest : destId,
-                    System.currentTimeMillis()
-                );
-                ruleRepo.insert(rule);
-                player.closeInventory();
-                String hopDisplay = RulesMainHolder.formatDestinationId(picker.getBlockedHopId(), stationRepo, nodeRepo);
-                String destDisplay = RulesMainHolder.formatDestinationId(destId, stationRepo, nodeRepo);
-                player.sendMessage("Rule " + ruleIndex + " created: when hop to " + hopDisplay + " is blocked, set destination to " + destDisplay + ".");
-                return;
-            }
             dev.netro.model.Rule editRule = picker.getEditRule();
             String railStateData = editRule != null && dev.netro.model.Rule.ACTION_SET_RAIL_STATE.equals(editRule.getActionType()) ? editRule.getActionData() : null;
             RulesCreateStep3Holder step3 = new RulesCreateStep3Holder(picker.getPlugin(), picker.getContextType(), picker.getContextId(), picker.getContextSide(), picker.getRulesTitle(), picker.getTriggerType(), picker.isDestinationPositive(), destId, editRule, railStateData);
@@ -651,6 +639,7 @@ public class CartControllerGuiListener implements Listener {
                     player.sendMessage("Rule " + r.getRuleIndex() + " updated: rail state saved.");
                 } else {
                     int idx = holder.createRule(dev.netro.model.Rule.ACTION_SET_RAIL_STATE, holder.getSelectedRailStateActionData());
+                    plugin.getDetectorRailHandler().invalidateRuleCache();
                     player.closeInventory();
                     RulesMainHolder main = new RulesMainHolder(holder.getPlugin(), holder.getContextType(), holder.getContextId(), holder.getContextSide(), holder.getRulesTitle());
                     player.openInventory(main.getInventory());
@@ -678,6 +667,7 @@ public class CartControllerGuiListener implements Listener {
                 player.sendMessage("Rule " + r.getRuleIndex() + " updated: turn bulbs ON (RULE:" + r.getRuleIndex() + ").");
             } else {
                 int idx = holder.createRule(dev.netro.model.Rule.ACTION_SEND_ON);
+                plugin.getDetectorRailHandler().invalidateRuleCache();
                 player.closeInventory();
                 player.sendMessage("Rule " + idx + " created: when " + holder.getTriggerType() + " and destination match, turn controller bulbs ON (controllers with RULE:" + idx + " on their sign).");
             }
@@ -693,6 +683,7 @@ public class CartControllerGuiListener implements Listener {
                 player.sendMessage("Rule " + r.getRuleIndex() + " updated: turn bulbs OFF (RULE:" + r.getRuleIndex() + ").");
             } else {
                 int idx = holder.createRule(dev.netro.model.Rule.ACTION_SEND_OFF);
+                plugin.getDetectorRailHandler().invalidateRuleCache();
                 player.closeInventory();
                 player.sendMessage("Rule " + idx + " created: when " + holder.getTriggerType() + " and destination match, turn controller bulbs OFF (controllers with RULE:" + idx + " on their sign).");
             }
@@ -765,6 +756,7 @@ public class CartControllerGuiListener implements Listener {
                 RulesCreateStep3Holder step3 = new RulesCreateStep3Holder(holder.getPlugin(), holder.getContextType(), holder.getContextId(), holder.getContextSide(),
                     holder.getRulesTitle(), holder.getTriggerType(), holder.isDestinationPositive(), holder.getDestinationId(), null, holder.getEncodedRailStateData());
                 int idx = step3.createRule(Rule.ACTION_SET_RAIL_STATE, holder.getEncodedRailStateData());
+                plugin.getDetectorRailHandler().invalidateRuleCache();
                 player.closeInventory();
                 RulesMainHolder main = new RulesMainHolder(holder.getPlugin(), holder.getContextType(), holder.getContextId(), holder.getContextSide(), holder.getRulesTitle());
                 player.openInventory(main.getInventory());
@@ -853,6 +845,7 @@ public class CartControllerGuiListener implements Listener {
         org.bukkit.block.data.Rail.Shape shape = holder.getShapeAtSlot(slot);
         if (shape != null) {
             int idx = holder.createRuleWithShape(shape);
+            plugin.getDetectorRailHandler().invalidateRuleCache();
             player.closeInventory();
             player.sendMessage("Rule " + idx + " created: when " + holder.getTriggerType() + " and destination match, set detector rail to " + shape.name().replace("_", " ") + ".");
         }
@@ -885,6 +878,7 @@ public class CartControllerGuiListener implements Listener {
         if (slot == RulesConfirmDeleteHolder.SLOT_CONFIRM) {
             int idx = holder.getRule().getRuleIndex();
             holder.deleteRule();
+            plugin.getDetectorRailHandler().invalidateRuleCache();
             player.closeInventory();
             player.sendMessage("Rule " + idx + " deleted. Other rules renumbered.");
         }
@@ -978,6 +972,7 @@ public class CartControllerGuiListener implements Listener {
                 if (chunkLoad != null) chunkLoad.removeChunksForBlock(d.getWorld(), d.getRailX(), d.getRailZ());
             }
             ruleRepo.deleteByContext(holder.getContextType(), holder.getNodeId());
+            plugin.getDetectorRailHandler().invalidateRuleCache();
             nodeRepo.deleteNodeAndAllBlockData(holder.getNodeId());
             player.closeInventory();
             player.sendMessage("Deleted " + holder.getNodeDisplayName() + ". Detectors, controllers, and rules for this node were removed.");
@@ -1108,6 +1103,7 @@ public class CartControllerGuiListener implements Listener {
                     System.currentTimeMillis()
                 );
                 ruleRepo.insert(rule);
+                plugin.getDetectorRailHandler().invalidateRuleCache();
                 player.closeInventory();
                 player.sendMessage("Rule " + ruleIndex + " created: when " + holder.getTriggerType() + " and destination match, set cruise speed to " + speedStr + ".");
             }
@@ -1241,6 +1237,7 @@ public class CartControllerGuiListener implements Listener {
             player.closeInventory();
             return;
         }
+        updateCartUuidWorldCache(cartUuid, cart.getWorld());
         CartControllerState state = stateFor(cartUuid);
 
         switch (slot) {
@@ -1339,6 +1336,7 @@ public class CartControllerGuiListener implements Listener {
             } else {
                 Minecart cart = findMinecartByUuid(destHolder.getCartUuid());
                 if (cart != null) {
+                    updateCartUuidWorldCache(destHolder.getCartUuid(), cart.getWorld());
                     player.closeInventory();
                     player.openInventory(new CartMenuHolder(destHolder.getCartUuid()).getInventory());
                 } else {
@@ -1391,6 +1389,12 @@ public class CartControllerGuiListener implements Listener {
     /** Set destination and return to main cart menu (do not close inventory). */
     private void setDestinationAndReturnToMain(Player player, String cartUuid, String address) {
         String resolved = resolveToTerminalIfStationHasTerminals(address);
+        var occupied = plugin.getRoutingEngine().checkTerminalOccupiedAndGetAlternative(resolved);
+        if (occupied.isPresent()) {
+            String display = RulesMainHolder.formatDestinationId(resolved, stationRepo, nodeRepo);
+            plugin.sendMessage(player, Component.text("Terminal " + display + " is occupied. Recommended closest alternative: " + occupied.get().alternativeDisplay() + ".", NamedTextColor.YELLOW));
+            return;
+        }
         cartRepo.setDestination(cartUuid, resolved, null);
         plugin.getDetectorRailHandler().recheckTerminalReleaseForCart(cartUuid);
         String display = RulesMainHolder.formatDestinationId(resolved, stationRepo, nodeRepo);

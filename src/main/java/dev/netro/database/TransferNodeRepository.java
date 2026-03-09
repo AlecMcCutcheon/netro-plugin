@@ -2,6 +2,7 @@ package dev.netro.database;
 
 import dev.netro.model.TransferNode;
 
+import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -18,15 +19,18 @@ public class TransferNodeRepository {
     }
 
     public Optional<TransferNode> findById(String id) {
-        return database.withConnection(conn -> {
-            try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT id, name, station_id, paired_node_id, setup_state, is_terminal, terminal_index, release_reversed, created_at FROM transfer_nodes WHERE id = ?")) {
-                ps.setString(1, id);
-                try (ResultSet rs = ps.executeQuery()) {
-                    return rs.next() ? Optional.of(rowToNode(rs)) : Optional.empty();
-                }
+        return database.withConnection(conn -> findById(conn, id));
+    }
+
+    /** Use when already holding a connection (e.g. inside runAsyncRead callback). */
+    public Optional<TransferNode> findById(Connection conn, String id) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+            "SELECT id, name, station_id, paired_node_id, setup_state, is_terminal, terminal_index, release_reversed, created_at FROM transfer_nodes WHERE id = ?")) {
+            ps.setString(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(rowToNode(rs)) : Optional.empty();
             }
-        });
+        }
     }
 
     public Optional<TransferNode> findByName(String name) {
@@ -196,6 +200,41 @@ public class TransferNodeRepository {
         });
     }
 
+    /** Terminal node IDs at this station with a free slot (held_count 0 or null). Exclude excludeNodeId if non-null. One query for substitute logic. */
+    public List<String> findTerminalNodeIdsWithFreeSlot(String stationId, String excludeNodeId) {
+        return database.withConnection(conn -> {
+            List<String> out = new ArrayList<>();
+            String sql = "SELECT n.id FROM transfer_nodes n LEFT JOIN cart_held_counts c ON c.node_id = n.id " +
+                "WHERE n.station_id = ? AND n.is_terminal = 1 AND n.setup_state = 'ready' " +
+                "AND (c.held_count IS NULL OR c.held_count = 0) " +
+                "AND (? IS NULL OR n.id != ?)";
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, stationId);
+                ps.setString(2, excludeNodeId);
+                ps.setString(3, excludeNodeId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) out.add(rs.getString("id"));
+                }
+            }
+            return out;
+        });
+    }
+
+    /** Station IDs that have at least one terminal with a free slot. One query for substitute/unreachable logic. */
+    public List<String> findStationIdsWithAvailableTerminal() {
+        return database.withConnection(conn -> {
+            List<String> out = new ArrayList<>();
+            try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT DISTINCT n.station_id FROM transfer_nodes n LEFT JOIN cart_held_counts c ON c.node_id = n.id " +
+                    "WHERE n.is_terminal = 1 AND n.setup_state = 'ready' AND (c.held_count IS NULL OR c.held_count = 0)")) {
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) out.add(rs.getString("station_id"));
+                }
+            }
+            return out;
+        });
+    }
+
     /** Deletes the transfer node and all its block data (switches, hold switches, gate slots). Cascade will remove child rows. */
     public void deleteNodeAndAllBlockData(String nodeId) {
         database.withConnection(conn -> {
@@ -226,19 +265,22 @@ public class TransferNodeRepository {
      * Transfer nodes: we do not track occupancy; always return 1 so dispatch is not blocked by "full".
      */
     public int countFreeSlots(String nodeId) {
-        return database.withConnection(conn -> {
-            try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT n.is_terminal, COALESCE(c.held_count, 0) FROM transfer_nodes n LEFT JOIN cart_held_counts c ON c.node_id = n.id WHERE n.id = ?")) {
-                ps.setString(1, nodeId);
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (!rs.next()) return 0;
-                    boolean terminal = rs.getInt(1) != 0;
-                    if (!terminal) return 1; // transfer nodes: no occupancy tracking
-                    int held = rs.getInt(2);
-                    return held == 0 ? 1 : 0;
-                }
+        return database.withConnection(conn -> countFreeSlots(conn, nodeId));
+    }
+
+    /** Use when already holding a connection (e.g. inside runAsyncRead callback). */
+    public int countFreeSlots(Connection conn, String nodeId) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+            "SELECT n.is_terminal, COALESCE(c.held_count, 0) FROM transfer_nodes n LEFT JOIN cart_held_counts c ON c.node_id = n.id WHERE n.id = ?")) {
+            ps.setString(1, nodeId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return 0;
+                boolean terminal = rs.getInt(1) != 0;
+                if (!terminal) return 1; // transfer nodes: no occupancy tracking
+                int held = rs.getInt(2);
+                return held == 0 ? 1 : 0;
             }
-        });
+        }
     }
 
     private static TransferNode rowToNode(ResultSet rs) throws SQLException {

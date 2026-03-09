@@ -29,7 +29,7 @@ public class RulesMainHolder implements InventoryHolder {
     /** First slot used for rule list (up to 45 rules). */
     public static final int RULES_START = 0;
     public static final int RULES_END = 44;
-    /** Special slot showing default blocked policy; not a real rule, cannot be deleted. */
+    /** Unused slot (was default blocked policy). */
     public static final int SLOT_DEFAULT_POLICY = 45;
     /** Pair transfer node (transfer context only). */
     public static final int SLOT_ACTION = 46;
@@ -76,7 +76,6 @@ public class RulesMainHolder implements InventoryHolder {
                 inventory.setItem(i, ruleItem(r, stationRepo, nodeRepo));
             }
         }
-        inventory.setItem(SLOT_DEFAULT_POLICY, defaultPolicyItem());
         if ("transfer".equals(contextType) && contextId != null) {
             inventory.setItem(SLOT_ACTION, pairButtonItem());
         }
@@ -164,25 +163,13 @@ public class RulesMainHolder implements InventoryHolder {
         return destId;
     }
 
-    private static ItemStack defaultPolicyItem() {
-        List<String> lore = new ArrayList<>();
-        lore.add("When any local destination is blocked and no rule matches:");
-        lore.add("1. Send to available terminal at this station");
-        lore.add("2. Else available terminal at another station");
-        lore.add("3. Else another unoccupied transfer node");
-        lore.add("");
-        lore.add("(Default policy — cannot be deleted)");
-        return newItem(Material.BOOK, "Default when blocked", lore);
-    }
-
     private static ItemStack ruleItem(Rule r, StationRepository stationRepo, TransferNodeRepository nodeRepo) {
         List<String> lore = new ArrayList<>();
         lore.add("Trigger: " + r.getTriggerType());
         if (Rule.TRIGGER_BLOCKED.equals(r.getTriggerType())) {
+            lore.add("(Blocked rules are no longer used; delete this rule.)");
             String destDisplay = formatDestinationId(r.getDestinationId(), stationRepo, nodeRepo);
-            lore.add("When hop to " + destDisplay + " is blocked");
-            String actionDestDisplay = formatDestinationId(r.getActionData(), stationRepo, nodeRepo);
-            lore.add("Action: set destination to " + actionDestDisplay);
+            lore.add("Was: when hop to " + destDisplay + " blocked → redirect");
         } else {
             String dest = r.getDestinationId() == null || r.getDestinationId().isEmpty() ? "any" : formatDestinationId(r.getDestinationId(), stationRepo, nodeRepo);
             String cond = r.isDestinationPositive() ? "to " + dest : "not to " + dest;

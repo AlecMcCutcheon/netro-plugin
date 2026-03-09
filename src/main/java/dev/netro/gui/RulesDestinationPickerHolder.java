@@ -30,10 +30,6 @@ public class RulesDestinationPickerHolder implements InventoryHolder {
 
     /** Normal picker for "going to" / "not going to". */
     public static final String PICKER_MODE_NORMAL = null;
-    /** Pick which hop triggers the blocked rule ("when this hop is blocked"). */
-    public static final String PICKER_MODE_BLOCKED_HOP = "blocked_hop";
-    /** Pick new destination for the blocked rule ("set destination to"). */
-    public static final String PICKER_MODE_SET_DESTINATION = "set_destination";
 
     private final NetroPlugin plugin;
     private final String contextType;
@@ -82,8 +78,6 @@ public class RulesDestinationPickerHolder implements InventoryHolder {
     }
 
     private String titleForMode() {
-        if (PICKER_MODE_BLOCKED_HOP.equals(pickerMode)) return "Rule: When which hop is blocked?";
-        if (PICKER_MODE_SET_DESTINATION.equals(pickerMode)) return "Rule: Set destination to?";
         return destinationPositive ? "Rule: Going to which?" : "Rule: Not going to which?";
     }
 
@@ -93,23 +87,6 @@ public class RulesDestinationPickerHolder implements InventoryHolder {
 
         StationRepository stationRepo = new StationRepository(plugin.getDatabase());
         TransferNodeRepository nodeRepo = new TransferNodeRepository(plugin.getDatabase());
-
-        if (PICKER_MODE_BLOCKED_HOP.equals(pickerMode)) {
-            int slot = DEST_START;
-            for (Station station : stationRepo.findAll()) {
-                String stationAddress = station.getAddress();
-                for (TransferNode node : nodeRepo.findTerminals(station.getId())) {
-                    if (slot >= SIZE) break;
-                    if (node.getTerminalIndex() == null) continue;
-                    String destId = AddressHelper.terminalAddress(stationAddress, node.getTerminalIndex());
-                    String display = station.getName() + ":" + node.getName();
-                    options.add(new DestinationOption(slot, destId, display));
-                    inventory.setItem(slot, newItem(Material.MINECART, display, List.of("Terminal blocked.")));
-                    slot++;
-                }
-            }
-            return;
-        }
 
         if ("transfer".equals(contextType) || "terminal".equals(contextType)) {
             Optional<TransferNode> contextNode = nodeRepo.findById(contextId);

@@ -3,6 +3,7 @@ package dev.netro.database;
 import dev.netro.model.BlockPos;
 import dev.netro.model.Detector;
 
+import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -103,25 +104,42 @@ public class DetectorRepository {
 
     /** Find all detectors that watch this rail block (stored rail equals this block, or bulb is adjacent to this block). */
     public List<Detector> findByRail(String world, int railX, int railY, int railZ) {
+        return database.withConnection(conn -> findByRail(conn, world, railX, railY, railZ));
+    }
+
+    /** Use when already holding a connection (e.g. inside runAsyncRead callback). */
+    public List<Detector> findByRail(Connection conn, String world, int railX, int railY, int railZ) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+            "SELECT id, node_id, world, x, y, z, rail_x, rail_y, rail_z, sign_facing, rule_1_role, rule_1_direction, rule_2_role, rule_2_direction, rule_3_role, rule_3_direction, rule_4_role, rule_4_direction FROM detectors WHERE world = ? AND ( (rail_x = ? AND rail_y = ? AND rail_z = ?) OR (x = ? AND y = ? AND z = ?) OR (x = ? AND y = ? AND z = ?) OR (x = ? AND y = ? AND z = ?) OR (x = ? AND y = ? AND z = ?) )")) {
+            ps.setString(1, world);
+            ps.setInt(2, railX);
+            ps.setInt(3, railY);
+            ps.setInt(4, railZ);
+            ps.setInt(5, railX + 1);
+            ps.setInt(6, railY);
+            ps.setInt(7, railZ);
+            ps.setInt(8, railX - 1);
+            ps.setInt(9, railY);
+            ps.setInt(10, railZ);
+            ps.setInt(11, railX);
+            ps.setInt(12, railY);
+            ps.setInt(13, railZ + 1);
+            ps.setInt(14, railX);
+            ps.setInt(15, railY);
+            ps.setInt(16, railZ - 1);
+            try (ResultSet rs = ps.executeQuery()) {
+                List<Detector> list = new ArrayList<>();
+                while (rs.next()) list.add(rowToDetector(rs));
+                return list;
+            }
+        }
+    }
+
+    public List<Detector> findByNodeId(String nodeId) {
         return database.withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT id, node_id, world, x, y, z, rail_x, rail_y, rail_z, sign_facing, rule_1_role, rule_1_direction, rule_2_role, rule_2_direction, rule_3_role, rule_3_direction, rule_4_role, rule_4_direction FROM detectors WHERE world = ? AND ( (rail_x = ? AND rail_y = ? AND rail_z = ?) OR (x = ? AND y = ? AND z = ?) OR (x = ? AND y = ? AND z = ?) OR (x = ? AND y = ? AND z = ?) OR (x = ? AND y = ? AND z = ?) )")) {
-                ps.setString(1, world);
-                ps.setInt(2, railX);
-                ps.setInt(3, railY);
-                ps.setInt(4, railZ);
-                ps.setInt(5, railX + 1);
-                ps.setInt(6, railY);
-                ps.setInt(7, railZ);
-                ps.setInt(8, railX - 1);
-                ps.setInt(9, railY);
-                ps.setInt(10, railZ);
-                ps.setInt(11, railX);
-                ps.setInt(12, railY);
-                ps.setInt(13, railZ + 1);
-                ps.setInt(14, railX);
-                ps.setInt(15, railY);
-                ps.setInt(16, railZ - 1);
+                "SELECT id, node_id, world, x, y, z, rail_x, rail_y, rail_z, sign_facing, rule_1_role, rule_1_direction, rule_2_role, rule_2_direction, rule_3_role, rule_3_direction, rule_4_role, rule_4_direction FROM detectors WHERE node_id = ?")) {
+                ps.setString(1, nodeId);
                 try (ResultSet rs = ps.executeQuery()) {
                     List<Detector> list = new ArrayList<>();
                     while (rs.next()) list.add(rowToDetector(rs));
@@ -131,11 +149,16 @@ public class DetectorRepository {
         });
     }
 
-    public List<Detector> findByNodeId(String nodeId) {
+    /** All detectors that have READY in any role (for syncing carts on READY rails to held state). */
+    public List<Detector> findWithRole(String role) {
+        if (role == null || role.isEmpty()) return new ArrayList<>();
         return database.withConnection(conn -> {
             try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT id, node_id, world, x, y, z, rail_x, rail_y, rail_z, sign_facing, rule_1_role, rule_1_direction, rule_2_role, rule_2_direction, rule_3_role, rule_3_direction, rule_4_role, rule_4_direction FROM detectors WHERE node_id = ?")) {
-                ps.setString(1, nodeId);
+                "SELECT id, node_id, world, x, y, z, rail_x, rail_y, rail_z, sign_facing, rule_1_role, rule_1_direction, rule_2_role, rule_2_direction, rule_3_role, rule_3_direction, rule_4_role, rule_4_direction FROM detectors WHERE rule_1_role = ? OR rule_2_role = ? OR rule_3_role = ? OR rule_4_role = ?")) {
+                ps.setString(1, role);
+                ps.setString(2, role);
+                ps.setString(3, role);
+                ps.setString(4, role);
                 try (ResultSet rs = ps.executeQuery()) {
                     List<Detector> list = new ArrayList<>();
                     while (rs.next()) list.add(rowToDetector(rs));

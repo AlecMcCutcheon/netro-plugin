@@ -6,7 +6,7 @@ This guide describes how the Netro plugin works, how to set it up, and how to us
 
 ## 1. What Netro Is and Why It Exists
 
-Netro is a Minecraft (Bukkit/Spigot 1.21.4) plugin for **rail networks**: stations, transfer nodes, terminals, and cart routing. It lets you:
+Netro is a Minecraft (Bukkit/Spigot 1.21–1.21.11) plugin for **rail networks**: stations, transfer nodes, terminals, and cart routing. It lets you:
 
 - Define **stations** with 2D hierarchical addresses (e.g. `OV:E2:N3:01:02:05` for Overworld, `NE:W1:S2:02:03:01` for Nether).
 - Attach **transfer nodes** (switches between lines) and **terminals** (parking slots at a station) to stations.

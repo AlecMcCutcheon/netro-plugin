@@ -1,9 +1,9 @@
 name: Netro
-version: 1.2.0
+version: 1.3.0-beta
 main: dev.netro.NetroPlugin
 api-version: '1.21'
-description: Rail network plugin — stations, transfer nodes, routing, cart tracking
+description: Rail network plugin (1.21–1.21.11) — stations, transfer nodes, routing, cart tracking
 
 commands:
   netro:
-    description: Netro root — cancel, clearcache, debug, guide, whereami, station, setdestination, dns, cartcontroller, railroadcontroller
+    description: Netro root — cancel, clearcache, debug, guide, titles, whereami, station, setdestination, dns, cartcontroller, railroadcontroller

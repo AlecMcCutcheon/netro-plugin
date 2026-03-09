@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Shows a boss bar to players holding the Cart Controller while in a minecart.
@@ -29,13 +30,31 @@ import java.util.UUID;
  */
 public class CartControllerBossBarUpdater implements Listener {
 
-    private static final long TICK_INTERVAL = 4L;
+    private static final long TICK_INTERVAL = 20L;
+    /** TTL for destination/next-node cache (ms). Reduces DB calls when same cart is shown every tick. */
+    private static final long CART_DISPLAY_CACHE_TTL_MS = 1500L;
+    /** Max cache size; evict expired when exceeding to avoid unbounded growth. */
+    private static final int CART_DISPLAY_CACHE_MAX_SIZE = 64;
 
     private final NetroPlugin plugin;
     private final CartRepository cartRepo;
     private final StationRepository stationRepo;
     private final TransferNodeRepository nodeRepo;
     private final Map<UUID, KeyedBossBar> barByPlayer = new HashMap<>();
+    /** Cache: cartUuid -> (destinationAddress, nextNodeId, expiryTimeMs). */
+    private final Map<String, CartDisplayCacheEntry> cartDisplayCache = new ConcurrentHashMap<>();
+
+    private static final class CartDisplayCacheEntry {
+        final String destinationAddress;
+        final String nextNodeId;
+        final long expiryTimeMs;
+
+        CartDisplayCacheEntry(String destinationAddress, String nextNodeId, long expiryTimeMs) {
+            this.destinationAddress = destinationAddress;
+            this.nextNodeId = nextNodeId;
+            this.expiryTimeMs = expiryTimeMs;
+        }
+    }
 
     public CartControllerBossBarUpdater(NetroPlugin plugin) {
         this.plugin = plugin;
@@ -101,19 +120,27 @@ public class CartControllerBossBarUpdater implements Listener {
         double speed = cart.getVelocity().length();
         parts.add("Speed: " + String.format("%.2f", speed));
 
-        Optional<String> destOpt = cartRepo.getDestinationAddress(cartUuid);
-        if (destOpt.isPresent() && destOpt.get() != null && !destOpt.get().isEmpty()) {
-            String destDisplay = RulesMainHolder.formatDestinationId(destOpt.get(), stationRepo, nodeRepo);
+        long now = System.currentTimeMillis();
+        CartDisplayCacheEntry cached = cartDisplayCache.get(cartUuid);
+        if (cached == null || now >= cached.expiryTimeMs) {
+            if (cartDisplayCache.size() >= CART_DISPLAY_CACHE_MAX_SIZE) {
+                cartDisplayCache.entrySet().removeIf(e -> e.getValue().expiryTimeMs < now);
+            }
+            Optional<String> destOpt = cartRepo.getDestinationAddress(cartUuid);
+            String dest = (destOpt.isPresent() && destOpt.get() != null && !destOpt.get().isEmpty()) ? destOpt.get() : null;
+            String nextNodeId = null;
+            Optional<Map<String, Object>> cartData = cartRepo.find(cartUuid);
+            if (cartData.isPresent()) nextNodeId = (String) cartData.get().get("next_node_id");
+            cached = new CartDisplayCacheEntry(dest, nextNodeId, now + CART_DISPLAY_CACHE_TTL_MS);
+            cartDisplayCache.put(cartUuid, cached);
+        }
+        if (cached.destinationAddress != null && !cached.destinationAddress.isEmpty()) {
+            String destDisplay = RulesMainHolder.formatDestinationId(cached.destinationAddress, stationRepo, nodeRepo);
             parts.add("Dest: " + destDisplay);
         }
-
-        Optional<Map<String, Object>> cartData = cartRepo.find(cartUuid);
-        if (cartData.isPresent()) {
-            String nextNodeId = (String) cartData.get().get("next_node_id");
-            if (nextNodeId != null && !nextNodeId.isEmpty()) {
-                String nextDisplay = RulesMainHolder.formatStationNode(nextNodeId, stationRepo, nodeRepo);
-                parts.add("Next: " + nextDisplay);
-            }
+        if (cached.nextNodeId != null && !cached.nextNodeId.isEmpty()) {
+            String nextDisplay = RulesMainHolder.formatStationNode(cached.nextNodeId, stationRepo, nodeRepo);
+            parts.add("Next: " + nextDisplay);
         }
 
         String cruiseSpeedStr = formatCruiseSpeed(state);

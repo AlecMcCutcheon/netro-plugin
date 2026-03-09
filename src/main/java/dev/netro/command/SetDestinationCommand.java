@@ -71,6 +71,13 @@ public class SetDestinationCommand implements CommandExecutor {
             return true;
         }
 
+        var occupied = plugin.getRoutingEngine().checkTerminalOccupiedAndGetAlternative(address);
+        if (occupied.isPresent()) {
+            String display = RulesMainHolder.formatDestinationId(address, stationRepo, nodeRepo);
+            sender.sendMessage("Terminal " + display + " is occupied. Recommended closest alternative: " + occupied.get().alternativeDisplay() + ".");
+            return true;
+        }
+
         String cartUuid = cart.getUniqueId().toString();
         String originStationId = null;
         if (sender instanceof Player) {

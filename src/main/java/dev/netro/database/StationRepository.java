@@ -2,10 +2,12 @@ package dev.netro.database;
 
 import dev.netro.model.Station;
 
+import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -20,15 +22,18 @@ public class StationRepository {
     }
 
     public Optional<Station> findById(String id) {
-        return database.withConnection(conn -> {
-            try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT " + STATION_COLUMNS + " FROM stations WHERE id = ?")) {
-                ps.setString(1, id);
-                try (ResultSet rs = ps.executeQuery()) {
-                    return rs.next() ? Optional.of(rowToStation(rs)) : Optional.empty();
-                }
+        return database.withConnection(conn -> findById(conn, id));
+    }
+
+    /** Use when already holding a connection (e.g. inside runAsyncRead callback). */
+    public Optional<Station> findById(Connection conn, String id) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+            "SELECT " + STATION_COLUMNS + " FROM stations WHERE id = ?")) {
+            ps.setString(1, id);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(rowToStation(rs)) : Optional.empty();
             }
-        });
+        }
     }
 
     /** Find by exact address (2D format: 6-part station or 7-part terminal, colon-separated). */
@@ -98,6 +103,26 @@ public class StationRepository {
                     return list;
                 }
             }
+        });
+    }
+
+    /** Load stations by IDs (for distance sort over candidate set only). Returns empty list if ids empty. */
+    public List<Station> findByIds(Collection<String> ids) {
+        if (ids == null || ids.isEmpty()) return List.of();
+        return database.withConnection(conn -> {
+            List<Station> list = new ArrayList<>();
+            String placeholders = ids.stream().map(id -> "?").reduce((a, b) -> a + "," + b).orElse("");
+            try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT " + STATION_COLUMNS + " FROM stations WHERE id IN (" + placeholders + ")")) {
+                int i = 1;
+                for (String id : ids) {
+                    ps.setString(i++, id);
+                }
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) list.add(rowToStation(rs));
+                }
+            }
+            return list;
         });
     }
 
